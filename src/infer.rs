@@ -326,6 +326,73 @@ impl Corpus {
         Some(out)
     }
 
+    /// Compare two corpora and summarize structural changes.
+    pub fn diff(before: &Self, after: &Self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "before samples: {}", before.sample_count);
+        let _ = writeln!(out, "after samples: {}", after.sample_count);
+
+        write_message_diff(
+            &mut out,
+            "root",
+            None,
+            Some(&before.root),
+            Some(&after.root),
+        );
+
+        let mut message_paths = BTreeSet::<FieldPath>::new();
+        message_paths.extend(before.nested.keys().cloned());
+        message_paths.extend(after.nested.keys().cloned());
+        for path in message_paths {
+            write_message_diff(
+                &mut out,
+                &path.message_name(),
+                Some(&path),
+                before.nested.get(&path),
+                after.nested.get(&path),
+            );
+        }
+
+        out
+    }
+
+    /// Compare two corpora and summarize structural changes as JSON.
+    pub fn diff_json(before: &Self, after: &Self) -> String {
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "{{\"before_samples\":{},\"after_samples\":{},\"messages\":[",
+            before.sample_count, after.sample_count
+        );
+
+        let mut first = true;
+        write_message_diff_json(
+            &mut out,
+            &mut first,
+            "root",
+            None,
+            Some(&before.root),
+            Some(&after.root),
+        );
+
+        let mut message_paths = BTreeSet::<FieldPath>::new();
+        message_paths.extend(before.nested.keys().cloned());
+        message_paths.extend(after.nested.keys().cloned());
+        for path in message_paths {
+            write_message_diff_json(
+                &mut out,
+                &mut first,
+                &path.message_name(),
+                Some(&path),
+                before.nested.get(&path),
+                after.nested.get(&path),
+            );
+        }
+
+        out.push_str("]}");
+        out
+    }
+
     fn observe_nested_message(&mut self, message: &Message, max_depth: usize) {
         for field in &message.fields {
             let path = FieldPath::root_field(field.number);
@@ -493,6 +560,259 @@ impl Corpus {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn write_message_diff(
+    out: &mut String,
+    name: &str,
+    path: Option<&FieldPath>,
+    before: Option<&MessageStats>,
+    after: Option<&MessageStats>,
+) {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    collect_field_diffs(path, before, after, &mut added, &mut removed, &mut changed);
+
+    if added.is_empty() && removed.is_empty() && changed.is_empty() {
+        return;
+    }
+
+    let _ = writeln!(out, "\n{name}:");
+    if !added.is_empty() {
+        let _ = writeln!(out, "  added:");
+        for field in added {
+            let _ = writeln!(out, "    {}", describe_field_for_diff(&field));
+        }
+    }
+    if !removed.is_empty() {
+        let _ = writeln!(out, "  removed:");
+        for field in removed {
+            let _ = writeln!(out, "    {}", describe_field_for_diff(&field));
+        }
+    }
+    if !changed.is_empty() {
+        let _ = writeln!(out, "  changed:");
+        for field in changed {
+            let _ = writeln!(out, "    field {}:", field.path);
+            for change in field.changes {
+                let _ = writeln!(out, "      {change}");
+            }
+        }
+    }
+}
+
+fn write_message_diff_json(
+    out: &mut String,
+    first: &mut bool,
+    name: &str,
+    path: Option<&FieldPath>,
+    before: Option<&MessageStats>,
+    after: Option<&MessageStats>,
+) {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    collect_field_diffs(path, before, after, &mut added, &mut removed, &mut changed);
+
+    if added.is_empty() && removed.is_empty() && changed.is_empty() {
+        return;
+    }
+
+    if !*first {
+        out.push(',');
+    }
+    *first = false;
+
+    let _ = write!(out, "{{\"message\":\"{}\",\"path\":", json_escape(name));
+    match path {
+        Some(path) => {
+            let _ = write!(out, "\"{path}\"");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"added\":[");
+    for (index, field) in added.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_field_diff_json(out, field);
+    }
+    out.push_str("],\"removed\":[");
+    for (index, field) in removed.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_field_diff_json(out, field);
+    }
+    out.push_str("],\"changed\":[");
+    for (index, field) in changed.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"path\":\"{}\",\"changes\":[", field.path);
+        for (change_index, change) in field.changes.iter().enumerate() {
+            if change_index > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "\"{}\"", json_escape(change));
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}");
+}
+
+#[derive(Debug)]
+struct AddedOrRemovedField<'a> {
+    path: FieldPath,
+    field: &'a FieldStats,
+    relevant_messages: usize,
+}
+
+#[derive(Debug)]
+struct ChangedField {
+    path: FieldPath,
+    changes: Vec<String>,
+}
+
+fn collect_field_diffs<'a>(
+    message_path: Option<&FieldPath>,
+    before: Option<&'a MessageStats>,
+    after: Option<&'a MessageStats>,
+    added: &mut Vec<AddedOrRemovedField<'a>>,
+    removed: &mut Vec<AddedOrRemovedField<'a>>,
+    changed: &mut Vec<ChangedField>,
+) {
+    let mut field_numbers = BTreeSet::<u32>::new();
+    if let Some(before) = before {
+        field_numbers.extend(before.fields.keys().copied());
+    }
+    if let Some(after) = after {
+        field_numbers.extend(after.fields.keys().copied());
+    }
+
+    for number in field_numbers {
+        let path = match message_path {
+            Some(parent) => parent.child(number),
+            None => FieldPath::root_field(number),
+        };
+        let before_message_observations = before
+            .map(|stats| stats.message_observations)
+            .unwrap_or_default();
+        let after_message_observations = after
+            .map(|stats| stats.message_observations)
+            .unwrap_or_default();
+        let before_field = before.and_then(|stats| stats.fields.get(&number));
+        let after_field = after.and_then(|stats| stats.fields.get(&number));
+
+        match (before_field, after_field) {
+            (Some(before_field), Some(after_field)) => {
+                let field_delta = field_changes(
+                    before_field,
+                    before_message_observations,
+                    after_field,
+                    after_message_observations,
+                );
+                if !field_delta.is_empty() {
+                    changed.push(ChangedField {
+                        path,
+                        changes: field_delta,
+                    });
+                }
+            }
+            (Some(before_field), None) => removed.push(AddedOrRemovedField {
+                path,
+                field: before_field,
+                relevant_messages: before_message_observations,
+            }),
+            (None, Some(after_field)) => added.push(AddedOrRemovedField {
+                path,
+                field: after_field,
+                relevant_messages: after_message_observations,
+            }),
+            (None, None) => {}
+        }
+    }
+}
+
+fn field_changes(
+    before: &FieldStats,
+    before_message_observations: usize,
+    after: &FieldStats,
+    after_message_observations: usize,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    let before_observed = format!("{}/{}", before.samples_seen, before_message_observations);
+    let after_observed = format!("{}/{}", after.samples_seen, after_message_observations);
+    if before_observed != after_observed {
+        changes.push(format!("observed: {before_observed} -> {after_observed}"));
+    }
+    if before.max_occurrences_per_sample != after.max_occurrences_per_sample {
+        changes.push(format!(
+            "max/sample: {} -> {}",
+            before.max_occurrences_per_sample, after.max_occurrences_per_sample
+        ));
+    }
+    let before_repeated = before.max_occurrences_per_sample > 1;
+    let after_repeated = after.max_occurrences_per_sample > 1;
+    if before_repeated != after_repeated {
+        changes.push(format!(
+            "repetition: {} -> {}",
+            repetition_label(before_repeated),
+            repetition_label(after_repeated)
+        ));
+    }
+    if before.wire_summary() != after.wire_summary() {
+        changes.push(format!(
+            "wire types: {} -> {}",
+            before.wire_summary(),
+            after.wire_summary()
+        ));
+    }
+    let before_confidence = before.confidence(before_message_observations);
+    let after_confidence = after.confidence(after_message_observations);
+    if before_confidence != after_confidence {
+        changes.push(format!(
+            "confidence: {} -> {}",
+            before_confidence.label(),
+            after_confidence.label()
+        ));
+    }
+    if before.evidence_summary() != after.evidence_summary() {
+        changes.push(format!(
+            "evidence: {} -> {}",
+            before.evidence_summary(),
+            after.evidence_summary()
+        ));
+    }
+    changes
+}
+
+fn repetition_label(value: bool) -> &'static str {
+    if value { "repeated" } else { "singular" }
+}
+
+fn describe_field_for_diff(field: &AddedOrRemovedField<'_>) -> String {
+    format!(
+        "field {}: observed {}/{} samples; wires: {}; confidence: {}",
+        field.path,
+        field.field.samples_seen,
+        field.relevant_messages,
+        field.field.wire_summary(),
+        field.field.confidence(field.relevant_messages).label()
+    )
+}
+
+fn write_field_diff_json(out: &mut String, field: &AddedOrRemovedField<'_>) {
+    let _ = write!(
+        out,
+        "{{\"path\":\"{path}\",\"observed_messages\":{},\"relevant_messages\":{},\"wire_types\":\"{}\",\"confidence\":\"{}\"}}",
+        field.field.samples_seen,
+        field.relevant_messages,
+        field.field.wire_summary(),
+        field.field.confidence(field.relevant_messages).label(),
+        path = field.path
+    );
 }
 
 #[derive(Debug, Clone)]

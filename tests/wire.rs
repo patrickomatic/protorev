@@ -365,6 +365,61 @@ fn values_can_follow_nested_field_paths() -> Result<(), protorev::Error> {
 }
 
 #[test]
+fn corpus_diff_reports_added_removed_and_changed_fields() -> Result<(), protorev::Error> {
+    let mut before_first = Vec::new();
+    push_varint_field(&mut before_first, 1, 10);
+    push_varint_field(&mut before_first, 2, 20);
+    push_len_field(&mut before_first, 3, b"before");
+
+    let mut before_second = Vec::new();
+    push_varint_field(&mut before_second, 1, 11);
+    push_varint_field(&mut before_second, 2, 21);
+
+    let mut after_first = Vec::new();
+    push_varint_field(&mut after_first, 1, 12);
+    push_varint_field(&mut after_first, 2, 22);
+    push_varint_field(&mut after_first, 2, 23);
+    push_fixed32_field(&mut after_first, 4, 4);
+
+    let mut after_second = Vec::new();
+    push_varint_field(&mut after_second, 1, 13);
+    push_varint_field(&mut after_second, 2, 24);
+    push_varint_field(&mut after_second, 2, 25);
+    push_fixed32_field(&mut after_second, 4, 5);
+
+    let before_messages = vec![
+        Message::decode(&before_first)?,
+        Message::decode(&before_second)?,
+    ];
+    let after_messages = vec![
+        Message::decode(&after_first)?,
+        Message::decode(&after_second)?,
+    ];
+    let before = Corpus::from_messages(&before_messages, 2);
+    let after = Corpus::from_messages(&after_messages, 2);
+    let diff = Corpus::diff(&before, &after);
+    let json = Corpus::diff_json(&before, &after);
+
+    assert!(diff.contains("before samples: 2"));
+    assert!(diff.contains("after samples: 2"));
+    assert!(diff.contains("added:"));
+    assert!(diff.contains("field 4: observed 2/2 samples"));
+    assert!(diff.contains("removed:"));
+    assert!(diff.contains("field 3: observed 1/2 samples"));
+    assert!(diff.contains("changed:"));
+    assert!(diff.contains("field 2:"));
+    assert!(diff.contains("max/sample: 1 -> 2"));
+    assert!(diff.contains("repetition: singular -> repeated"));
+
+    assert!(json.contains("\"before_samples\":2"));
+    assert!(json.contains("\"path\":\"4\""));
+    assert!(json.contains("\"path\":\"3\""));
+    assert!(json.contains("repetition: singular -> repeated"));
+
+    Ok(())
+}
+
+#[test]
 fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Vec::new();
     push_varint_field(&mut first, 1, 150);
@@ -455,7 +510,20 @@ fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error
     let diff = run_protorev(["diff", path_str(&first_path)?, path_str(&second_path)?])?;
     assert_success(&diff);
     let diff_stdout = String::from_utf8(diff.stdout)?;
-    assert!(diff_stdout.contains("field 1: observed 2/2 samples"));
+    assert!(diff_stdout.contains("before samples: 1"));
+    assert!(diff_stdout.contains("after samples: 1"));
+
+    let diff_json = run_protorev([
+        "diff",
+        "--json",
+        path_str(&first_path)?,
+        "--",
+        path_str(&second_path)?,
+    ])?;
+    assert_success(&diff_json);
+    let diff_json_stdout = String::from_utf8(diff_json.stdout)?;
+    assert!(diff_json_stdout.contains("\"before_samples\":1"));
+    assert!(diff_json_stdout.contains("\"after_samples\":1"));
 
     Ok(())
 }

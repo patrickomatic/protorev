@@ -151,17 +151,23 @@ fn values_command(args: &[String]) -> Result<(), Error> {
     }
 }
 
-fn diff_command(paths: &[String]) -> Result<(), Error> {
-    if paths.len() != 2 {
+fn diff_command(args: &[String]) -> Result<(), Error> {
+    let (json, before_paths, after_paths) = parse_diff_args(args)?;
+    if before_paths.is_empty() || after_paths.is_empty() {
         return Err(Error::message(
-            "usage: protorev diff <before.pb> <after.pb>",
+            "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
         ));
     }
 
-    let before = read_message(&paths[0])?;
-    let after = read_message(&paths[1])?;
-    let corpus = Corpus::from_messages(&[before, after], DEFAULT_MAX_DEPTH);
-    print!("{}", corpus.summary());
+    let before_messages = read_messages(&before_paths)?;
+    let after_messages = read_messages(&after_paths)?;
+    let before = Corpus::from_messages(&before_messages, DEFAULT_MAX_DEPTH);
+    let after = Corpus::from_messages(&after_messages, DEFAULT_MAX_DEPTH);
+    if json {
+        println!("{}", Corpus::diff_json(&before, &after));
+    } else {
+        print!("{}", Corpus::diff(&before, &after));
+    }
     Ok(())
 }
 
@@ -249,6 +255,49 @@ fn parse_field_path_args<'a>(
     Ok((json, field_path, paths))
 }
 
+fn parse_diff_args(args: &[String]) -> Result<(bool, Vec<&str>, Vec<&str>), Error> {
+    let mut json = false;
+    let mut separator = None;
+    let mut paths = Vec::new();
+
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--" {
+            if separator.is_some() {
+                return Err(Error::message(
+                    "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
+                ));
+            }
+            separator = Some(paths.len());
+        } else {
+            paths.push(arg.as_str());
+        }
+    }
+
+    if let Some(separator) = separator {
+        let before = paths[..separator].to_vec();
+        let after = paths[separator..].to_vec();
+        return Ok((json, before, after));
+    }
+
+    if paths.len() == 2 {
+        return Ok((json, vec![paths[0]], vec![paths[1]]));
+    }
+
+    Err(Error::message(
+        "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
+    ))
+}
+
+fn read_messages(paths: &[&str]) -> Result<Vec<Message>, Error> {
+    let mut messages = Vec::new();
+    for path in paths {
+        messages.push(read_message(path)?);
+    }
+    Ok(messages)
+}
+
 fn read_message(path: impl AsRef<Path>) -> Result<Message, Error> {
     let bytes = std::fs::read(path)?;
     Message::decode(&bytes)
@@ -263,5 +312,5 @@ fn print_usage() {
     println!("  protorev schema [--min-confidence high|medium|low] <file.pb>...");
     println!("  protorev explain [--json] --field <path> <file.pb>...");
     println!("  protorev values [--json] --field <path> <file.pb>...");
-    println!("  protorev diff <before.pb> <after.pb>");
+    println!("  protorev diff [--json] <before.pb>... -- <after.pb>...");
 }

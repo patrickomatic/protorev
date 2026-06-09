@@ -20,7 +20,7 @@ cargo run -p protorev -- infer samples/*.pb
 cargo run -p protorev -- schema samples/*.pb
 cargo run -p protorev -- explain --field 3.1 samples/*.pb
 cargo run -p protorev -- values --field 1 samples/*.pb
-cargo run -p protorev -- diff before.pb after.pb
+cargo run -p protorev -- diff before/*.pb -- after/*.pb
 ```
 
 ### `dump`
@@ -109,8 +109,27 @@ cargo run -p protorev -- values --json --field 1 samples/*.pb
 
 ### `diff`
 
-`diff` is a small convenience around `infer` for two files. It gives a compact
-shape comparison for controlled before/after samples.
+`diff` compares two corpora and reports structural changes:
+
+```bash
+cargo run -p protorev -- diff before/*.pb -- after/*.pb
+```
+
+It reports added, removed, and changed fields. A changed field can include
+presence, repetition, wire type, confidence, or length-delimited evidence
+changes.
+
+The old two-file shorthand still works:
+
+```bash
+cargo run -p protorev -- diff before.pb after.pb
+```
+
+For tooling:
+
+```bash
+cargo run -p protorev -- diff --json before/*.pb -- after/*.pb
+```
 
 ### `schema`
 
