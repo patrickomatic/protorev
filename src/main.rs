@@ -26,6 +26,7 @@ fn run() -> Result<(), Error> {
         "infer" => infer_command(&paths),
         "schema" => schema_command(&paths),
         "explain" => explain_command(&paths),
+        "values" => values_command(&paths),
         "diff" => diff_command(&paths),
         "-h" | "--help" | "help" => {
             print_usage();
@@ -115,6 +116,41 @@ fn explain_command(args: &[String]) -> Result<(), Error> {
     }
 }
 
+fn values_command(args: &[String]) -> Result<(), Error> {
+    let (json, field_path, paths) = parse_field_path_args(
+        args,
+        "usage: protorev values [--json] --field <path> <file.pb>...",
+    )?;
+    if paths.is_empty() {
+        return Err(Error::message(
+            "usage: protorev values [--json] --field <path> <file.pb>...",
+        ));
+    }
+
+    let mut messages = Vec::new();
+    for path in paths {
+        messages.push(read_message(path)?);
+    }
+    let corpus = Corpus::from_messages(&messages, DEFAULT_MAX_DEPTH);
+    let output = if json {
+        corpus.values_json(&messages, &field_path)
+    } else {
+        corpus.values(&messages, &field_path)
+    };
+    match output {
+        Some(output) => {
+            print!("{output}");
+            if json {
+                println!();
+            }
+            Ok(())
+        }
+        None => Err(Error::message(format!(
+            "field {field_path} had no observed values in the corpus"
+        ))),
+    }
+}
+
 fn diff_command(paths: &[String]) -> Result<(), Error> {
     if paths.len() != 2 {
         return Err(Error::message(
@@ -171,6 +207,16 @@ fn parse_dump_args(args: &[String]) -> (bool, Vec<&str>) {
 }
 
 fn parse_explain_args(args: &[String]) -> Result<(bool, FieldPath, Vec<&str>), Error> {
+    parse_field_path_args(
+        args,
+        "usage: protorev explain [--json] --field <path> <file.pb>...",
+    )
+}
+
+fn parse_field_path_args<'a>(
+    args: &'a [String],
+    usage: &'static str,
+) -> Result<(bool, FieldPath, Vec<&'a str>), Error> {
     let mut json = false;
     let mut field_path = None;
     let mut paths = Vec::new();
@@ -183,9 +229,7 @@ fn parse_explain_args(args: &[String]) -> Result<(bool, FieldPath, Vec<&str>), E
             index += 1;
         } else if arg == "--field" {
             let Some(value) = args.get(index + 1) else {
-                return Err(Error::message(
-                    "usage: protorev explain [--json] --field <path> <file.pb>...",
-                ));
+                return Err(Error::message(usage));
             };
             field_path = FieldPath::parse(value);
             if field_path.is_none() {
@@ -199,9 +243,7 @@ fn parse_explain_args(args: &[String]) -> Result<(bool, FieldPath, Vec<&str>), E
     }
 
     let Some(field_path) = field_path else {
-        return Err(Error::message(
-            "usage: protorev explain [--json] --field <path> <file.pb>...",
-        ));
+        return Err(Error::message(usage));
     };
 
     Ok((json, field_path, paths))
@@ -220,5 +262,6 @@ fn print_usage() {
     println!("  protorev infer <file.pb>...");
     println!("  protorev schema [--min-confidence high|medium|low] <file.pb>...");
     println!("  protorev explain [--json] --field <path> <file.pb>...");
+    println!("  protorev values [--json] --field <path> <file.pb>...");
     println!("  protorev diff <before.pb> <after.pb>");
 }

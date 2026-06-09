@@ -19,6 +19,7 @@ cargo run -p protorev -- dump --json sample.pb
 cargo run -p protorev -- infer samples/*.pb
 cargo run -p protorev -- schema samples/*.pb
 cargo run -p protorev -- explain --field 3.1 samples/*.pb
+cargo run -p protorev -- values --field 1 samples/*.pb
 cargo run -p protorev -- diff before.pb after.pb
 ```
 
@@ -85,6 +86,25 @@ For tooling, add `--json`:
 
 ```bash
 cargo run -p protorev -- explain --json --field 3.1 samples/*.pb
+```
+
+### `values`
+
+`values` summarizes observed values for one field path:
+
+```bash
+cargo run -p protorev -- values --field 1 samples/*.pb
+```
+
+For numeric fields it reports min, max, distinct count, common values, and
+conservative candidates such as bool, enum-like, or counter/id-like. For
+length-delimited fields it reports length ranges plus UTF-8, nested-message,
+and packed-varint observation counts.
+
+For tooling:
+
+```bash
+cargo run -p protorev -- values --json --field 1 samples/*.pb
 ```
 
 ### `diff`

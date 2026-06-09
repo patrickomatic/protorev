@@ -296,6 +296,75 @@ fn explain_reports_field_evidence_by_path() -> Result<(), protorev::Error> {
 }
 
 #[test]
+fn values_summarizes_numeric_and_length_delimited_fields() -> Result<(), protorev::Error> {
+    let mut first = Vec::new();
+    push_varint_field(&mut first, 1, 0);
+    push_varint_field(&mut first, 1, 1);
+    push_len_field(&mut first, 2, b"title");
+
+    let mut second = Vec::new();
+    push_varint_field(&mut second, 1, 42);
+    push_len_field(&mut second, 2, b"title");
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let field_one = protorev::FieldPath::parse("1")
+        .ok_or_else(|| protorev::Error::message("field path should parse"))?;
+    let field_two = protorev::FieldPath::parse("2")
+        .ok_or_else(|| protorev::Error::message("field path should parse"))?;
+    let numeric = corpus
+        .values(&messages, &field_one)
+        .ok_or_else(|| protorev::Error::message("field should have values"))?;
+    let numeric_json = corpus
+        .values_json(&messages, &field_one)
+        .ok_or_else(|| protorev::Error::message("field should have values"))?;
+    let text = corpus
+        .values(&messages, &field_two)
+        .ok_or_else(|| protorev::Error::message("field should have values"))?;
+
+    assert!(numeric.contains("occurrences: 3"));
+    assert!(numeric.contains("min: 0"));
+    assert!(numeric.contains("max: 42"));
+    assert!(numeric.contains("distinct: 3"));
+    assert!(numeric.contains("counter_or_id: yes"));
+    assert!(numeric_json.contains("\"path\":\"1\""));
+    assert!(numeric_json.contains("\"max\":42"));
+    assert!(numeric_json.contains("\"counter_or_id\":true"));
+
+    assert!(text.contains("length-delimited:"));
+    assert!(text.contains("utf8: 2/2"));
+    assert!(text.contains("text distinct: 1"));
+    assert!(text.contains("\"title\": 2"));
+
+    Ok(())
+}
+
+#[test]
+fn values_can_follow_nested_field_paths() -> Result<(), protorev::Error> {
+    let nested = message_bytes(&[(1, 0, 7)]);
+    let mut first = Vec::new();
+    push_len_field(&mut first, 3, &nested);
+
+    let mut second = Vec::new();
+    push_len_field(&mut second, 3, &nested);
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let path = protorev::FieldPath::parse("3.1")
+        .ok_or_else(|| protorev::Error::message("field path should parse"))?;
+    let values = corpus
+        .values(&messages, &path)
+        .ok_or_else(|| protorev::Error::message("field should have values"))?;
+
+    assert!(values.contains("field 3.1"));
+    assert!(values.contains("occurrences: 2"));
+    assert!(values.contains("min: 7"));
+    assert!(values.contains("max: 7"));
+
+    Ok(())
+}
+
+#[test]
 fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Vec::new();
     push_varint_field(&mut first, 1, 150);
@@ -356,6 +425,32 @@ fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error
     let explain_json_stdout = String::from_utf8(explain_json.stdout)?;
     assert!(explain_json_stdout.contains("\"path\":\"1\""));
     assert!(explain_json_stdout.contains("\"confidence\":\"high\""));
+
+    let values = run_protorev([
+        "values",
+        "--field",
+        "1",
+        path_str(&first_path)?,
+        path_str(&second_path)?,
+    ])?;
+    assert_success(&values);
+    let values_stdout = String::from_utf8(values.stdout)?;
+    assert!(values_stdout.contains("field 1"));
+    assert!(values_stdout.contains("min: 150"));
+    assert!(values_stdout.contains("max: 151"));
+
+    let values_json = run_protorev([
+        "values",
+        "--json",
+        "--field",
+        "1",
+        path_str(&first_path)?,
+        path_str(&second_path)?,
+    ])?;
+    assert_success(&values_json);
+    let values_json_stdout = String::from_utf8(values_json.stdout)?;
+    assert!(values_json_stdout.contains("\"path\":\"1\""));
+    assert!(values_json_stdout.contains("\"max\":151"));
 
     let diff = run_protorev(["diff", path_str(&first_path)?, path_str(&second_path)?])?;
     assert_success(&diff);

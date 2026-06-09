@@ -294,6 +294,38 @@ impl Corpus {
         Some(out)
     }
 
+    /// Summarize observed values for one field path.
+    pub fn values(&self, messages: &[Message], path: &FieldPath) -> Option<String> {
+        let observations = collect_value_observations(messages, path);
+        if observations.is_empty() {
+            return None;
+        }
+
+        let mut out = String::new();
+        let _ = writeln!(out, "field {path}");
+        let _ = writeln!(out, "  occurrences: {}", observations.len());
+        write_value_summary(&mut out, &observations, 1);
+        Some(out)
+    }
+
+    /// Summarize observed values for one field path as JSON.
+    pub fn values_json(&self, messages: &[Message], path: &FieldPath) -> Option<String> {
+        let observations = collect_value_observations(messages, path);
+        if observations.is_empty() {
+            return None;
+        }
+
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "{{\"path\":\"{path}\",\"occurrences\":{}",
+            observations.len()
+        );
+        write_value_summary_json(&mut out, &observations);
+        out.push('}');
+        Some(out)
+    }
+
     fn observe_nested_message(&mut self, message: &Message, max_depth: usize) {
         for field in &message.fields {
             let path = FieldPath::root_field(field.number);
@@ -461,6 +493,378 @@ impl Corpus {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+#[derive(Debug, Clone)]
+struct ValueObservation {
+    wire_type: WireType,
+    value: Value,
+}
+
+fn collect_value_observations(messages: &[Message], path: &FieldPath) -> Vec<ValueObservation> {
+    let mut observations = Vec::new();
+    for message in messages {
+        collect_value_observations_from_message(message, &path.0, &mut observations);
+    }
+    observations
+}
+
+fn collect_value_observations_from_message(
+    message: &Message,
+    path: &[u32],
+    observations: &mut Vec<ValueObservation>,
+) {
+    let Some((number, rest)) = path.split_first() else {
+        return;
+    };
+
+    for field in message
+        .fields
+        .iter()
+        .filter(|field| field.number == *number)
+    {
+        if rest.is_empty() {
+            observations.push(ValueObservation {
+                wire_type: field.wire_type,
+                value: field.value.clone(),
+            });
+            continue;
+        }
+
+        let Value::LengthDelimited(bytes) = &field.value else {
+            continue;
+        };
+        let Ok(nested) = Message::decode(bytes) else {
+            continue;
+        };
+        collect_value_observations_from_message(&nested, rest, observations);
+    }
+}
+
+fn write_value_summary(out: &mut String, observations: &[ValueObservation], indent: usize) {
+    let padding = "  ".repeat(indent);
+    let mut wire_types = BTreeSet::new();
+    for observation in observations {
+        wire_types.insert(observation.wire_type);
+    }
+    let wire_summary = wire_types
+        .iter()
+        .map(|wire| wire.name())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = writeln!(out, "{padding}wire types: {wire_summary}");
+
+    if let Some(values) = collect_varints(observations) {
+        write_integer_summary(out, &padding, &values, "varint");
+    }
+    if let Some(values) = collect_fixed32(observations) {
+        write_integer_summary(out, &padding, &values, "fixed32");
+    }
+    if let Some(values) = collect_fixed64(observations) {
+        write_integer_summary(out, &padding, &values, "fixed64");
+    }
+
+    let length_values = collect_length_delimited(observations);
+    if !length_values.is_empty() {
+        write_length_delimited_summary(out, &padding, &length_values);
+    }
+}
+
+fn write_value_summary_json(out: &mut String, observations: &[ValueObservation]) {
+    let mut wire_types = BTreeSet::new();
+    for observation in observations {
+        wire_types.insert(observation.wire_type);
+    }
+
+    out.push_str(",\"wire_types\":[");
+    for (index, wire_type) in wire_types.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "\"{}\"", wire_type.name());
+    }
+    out.push(']');
+
+    if let Some(values) = collect_varints(observations) {
+        write_integer_summary_json(out, &values, "varint");
+    }
+    if let Some(values) = collect_fixed32(observations) {
+        write_integer_summary_json(out, &values, "fixed32");
+    }
+    if let Some(values) = collect_fixed64(observations) {
+        write_integer_summary_json(out, &values, "fixed64");
+    }
+
+    let length_values = collect_length_delimited(observations);
+    if !length_values.is_empty() {
+        write_length_delimited_summary_json(out, &length_values);
+    }
+}
+
+fn collect_varints(observations: &[ValueObservation]) -> Option<Vec<u64>> {
+    let values = observations
+        .iter()
+        .filter_map(|observation| match observation.value {
+            Value::Varint(value) => Some(value),
+            Value::Fixed64(_) | Value::LengthDelimited(_) | Value::Fixed32(_) => None,
+        })
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
+fn collect_fixed32(observations: &[ValueObservation]) -> Option<Vec<u64>> {
+    let values = observations
+        .iter()
+        .filter_map(|observation| match observation.value {
+            Value::Fixed32(value) => Some(u64::from(value)),
+            Value::Varint(_) | Value::Fixed64(_) | Value::LengthDelimited(_) => None,
+        })
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
+fn collect_fixed64(observations: &[ValueObservation]) -> Option<Vec<u64>> {
+    let values = observations
+        .iter()
+        .filter_map(|observation| match observation.value {
+            Value::Fixed64(value) => Some(value),
+            Value::Varint(_) | Value::LengthDelimited(_) | Value::Fixed32(_) => None,
+        })
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(values)
+}
+
+fn collect_length_delimited(observations: &[ValueObservation]) -> Vec<&[u8]> {
+    observations
+        .iter()
+        .filter_map(|observation| match &observation.value {
+            Value::LengthDelimited(bytes) => Some(bytes.as_slice()),
+            Value::Varint(_) | Value::Fixed64(_) | Value::Fixed32(_) => None,
+        })
+        .collect()
+}
+
+fn write_integer_summary(out: &mut String, padding: &str, values: &[u64], label: &str) {
+    let Some(min) = values.iter().min() else {
+        return;
+    };
+    let Some(max) = values.iter().max() else {
+        return;
+    };
+    let counts = value_counts(values);
+
+    let _ = writeln!(out, "{padding}{label}:");
+    let _ = writeln!(out, "{padding}  min: {min}");
+    let _ = writeln!(out, "{padding}  max: {max}");
+    let _ = writeln!(out, "{padding}  distinct: {}", counts.len());
+    let _ = writeln!(out, "{padding}  common:");
+    for (value, count) in counts.iter().take(5) {
+        let _ = writeln!(out, "{padding}    {value}: {count}");
+    }
+    let _ = writeln!(out, "{padding}  candidates:");
+    let _ = writeln!(
+        out,
+        "{padding}    bool: {}",
+        yes_no(is_bool_candidate(values))
+    );
+    let _ = writeln!(
+        out,
+        "{padding}    enum: {}",
+        yes_no(is_enum_candidate(values))
+    );
+    let _ = writeln!(
+        out,
+        "{padding}    counter_or_id: {}",
+        yes_no(is_counter_or_id_candidate(values))
+    );
+}
+
+fn write_integer_summary_json(out: &mut String, values: &[u64], label: &str) {
+    let Some(min) = values.iter().min() else {
+        return;
+    };
+    let Some(max) = values.iter().max() else {
+        return;
+    };
+    let counts = value_counts(values);
+
+    let _ = write!(
+        out,
+        ",\"{label}\":{{\"min\":{min},\"max\":{max},\"distinct\":{},\"common\":[",
+        counts.len()
+    );
+    for (index, (value, count)) in counts.iter().take(5).enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"value\":{value},\"count\":{count}}}");
+    }
+    let _ = write!(
+        out,
+        "],\"candidates\":{{\"bool\":{},\"enum\":{},\"counter_or_id\":{}}}}}",
+        is_bool_candidate(values),
+        is_enum_candidate(values),
+        is_counter_or_id_candidate(values)
+    );
+}
+
+fn write_length_delimited_summary(out: &mut String, padding: &str, values: &[&[u8]]) {
+    let lengths = values
+        .iter()
+        .map(|value| value.len() as u64)
+        .collect::<Vec<_>>();
+    let Some(min_len) = lengths.iter().min() else {
+        return;
+    };
+    let Some(max_len) = lengths.iter().max() else {
+        return;
+    };
+
+    let mut nested = 0usize;
+    let mut utf8 = 0usize;
+    let mut packed = 0usize;
+    let mut texts = BTreeMap::<String, usize>::new();
+    for value in values {
+        let hints = LengthDelimitedHints::classify(value);
+        if hints.nested_message.is_some() {
+            nested += 1;
+        }
+        if let Some(text) = hints.utf8 {
+            utf8 += 1;
+            texts
+                .entry(text)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+        if hints.packed_varints.is_some() {
+            packed += 1;
+        }
+    }
+
+    let _ = writeln!(out, "{padding}length-delimited:");
+    let _ = writeln!(out, "{padding}  lengths:");
+    let _ = writeln!(out, "{padding}    min: {min_len}");
+    let _ = writeln!(out, "{padding}    max: {max_len}");
+    let _ = writeln!(out, "{padding}  utf8: {utf8}/{}", values.len());
+    let _ = writeln!(out, "{padding}  nested message: {nested}/{}", values.len());
+    let _ = writeln!(out, "{padding}  packed varint: {packed}/{}", values.len());
+    if !texts.is_empty() {
+        let _ = writeln!(out, "{padding}  text distinct: {}", texts.len());
+        let _ = writeln!(out, "{padding}  text common:");
+        for (text, count) in sorted_text_counts(&texts).into_iter().take(5) {
+            let _ = writeln!(out, "{padding}    {text:?}: {count}");
+        }
+    }
+}
+
+fn write_length_delimited_summary_json(out: &mut String, values: &[&[u8]]) {
+    let lengths = values
+        .iter()
+        .map(|value| value.len() as u64)
+        .collect::<Vec<_>>();
+    let Some(min_len) = lengths.iter().min() else {
+        return;
+    };
+    let Some(max_len) = lengths.iter().max() else {
+        return;
+    };
+
+    let mut nested = 0usize;
+    let mut utf8 = 0usize;
+    let mut packed = 0usize;
+    let mut texts = BTreeMap::<String, usize>::new();
+    for value in values {
+        let hints = LengthDelimitedHints::classify(value);
+        if hints.nested_message.is_some() {
+            nested += 1;
+        }
+        if let Some(text) = hints.utf8 {
+            utf8 += 1;
+            texts
+                .entry(text)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+        if hints.packed_varints.is_some() {
+            packed += 1;
+        }
+    }
+
+    let _ = write!(
+        out,
+        ",\"length_delimited\":{{\"min_len\":{min_len},\"max_len\":{max_len},\"utf8_occurrences\":{utf8},\"nested_message_occurrences\":{nested},\"packed_varint_occurrences\":{packed},\"text_distinct\":{},\"text_common\":[",
+        texts.len()
+    );
+    for (index, (text, count)) in sorted_text_counts(&texts).into_iter().take(5).enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"value\":\"{}\",\"count\":{count}}}",
+            json_escape(text)
+        );
+    }
+    out.push_str("]}");
+}
+
+fn value_counts(values: &[u64]) -> Vec<(u64, usize)> {
+    let mut counts = BTreeMap::<u64, usize>::new();
+    for value in values {
+        counts
+            .entry(*value)
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+    }
+    let mut counts = counts.into_iter().collect::<Vec<_>>();
+    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    counts
+}
+
+fn sorted_text_counts(counts: &BTreeMap<String, usize>) -> Vec<(&str, usize)> {
+    let mut counts = counts
+        .iter()
+        .map(|(value, count)| (value.as_str(), *count))
+        .collect::<Vec<_>>();
+    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    counts
+}
+
+fn is_bool_candidate(values: &[u64]) -> bool {
+    values.iter().all(|value| matches!(value, 0 | 1))
+}
+
+fn is_enum_candidate(values: &[u64]) -> bool {
+    let counts = value_counts(values);
+    counts.len() <= 16 && counts.iter().all(|(value, _)| *value <= 1024)
+}
+
+fn is_counter_or_id_candidate(values: &[u64]) -> bool {
+    let Some(min) = values.iter().min() else {
+        return false;
+    };
+    let Some(max) = values.iter().max() else {
+        return false;
+    };
+    *max > 16 && *max > *min
+}
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::new();
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if character.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(character));
+            }
+            character => out.push(character),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default)]

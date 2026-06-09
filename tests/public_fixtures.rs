@@ -110,6 +110,33 @@ fn cli_schema_reads_public_hex_fixture_bytes() -> Result<(), TestError> {
     Ok(())
 }
 
+#[test]
+fn values_summarize_official_test4_fixture() -> Result<(), TestError> {
+    let messages = vec![
+        fixture_message("test4_packed_repeated.pb.hex")?,
+        fixture_message("test4_mixed_order_equivalent.pb.hex")?,
+    ];
+    let corpus = Corpus::from_messages(&messages, 4);
+    let field_four = protorev::FieldPath::parse("4")
+        .ok_or_else(|| TestError::message("field path should parse"))?;
+    let field_five = protorev::FieldPath::parse("5")
+        .ok_or_else(|| TestError::message("field path should parse"))?;
+
+    let string_values = corpus
+        .values(&messages, &field_four)
+        .ok_or_else(|| TestError::message("field 4 should have values"))?;
+    assert!(string_values.contains("utf8: 2/2"));
+    assert!(string_values.contains("\"hello\": 2"));
+
+    let packed_values = corpus
+        .values(&messages, &field_five)
+        .ok_or_else(|| TestError::message("field 5 should have values"))?;
+    assert!(packed_values.contains("occurrences: 3"));
+    assert!(packed_values.contains("packed varint: 2/3"));
+
+    Ok(())
+}
+
 fn fixture_message(name: &str) -> Result<Message, TestError> {
     Message::decode(&fixture_bytes(name)?).map_err(TestError::from)
 }
