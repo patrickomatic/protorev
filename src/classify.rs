@@ -1,13 +1,24 @@
+//! Heuristics for length-delimited protobuf values.
+//!
+//! Length-delimited fields are ambiguous without a schema: the same bytes may
+//! be a nested message, a string, packed scalars, or opaque bytes. This module
+//! reports candidates and leaves interpretation to the caller.
+
 use crate::wire::{Message, read_varint};
 
+/// Candidate interpretations for a length-delimited value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LengthDelimitedHints {
+    /// Present when the full payload decodes cleanly as a protobuf message.
     pub nested_message: Option<Message>,
+    /// Present when the full payload is valid UTF-8 text.
     pub utf8: Option<String>,
+    /// Present when the full payload decodes as two or more varints.
     pub packed_varints: Option<Vec<u64>>,
 }
 
 impl LengthDelimitedHints {
+    /// Classify one length-delimited payload.
     pub fn classify(bytes: &[u8]) -> Self {
         let utf8 = classify_utf8(bytes);
         let packed_varints = if utf8.is_none() {

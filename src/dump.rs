@@ -1,3 +1,5 @@
+//! Text dumps for decoded protobuf messages.
+
 use std::fmt::Write as _;
 
 use crate::classify::LengthDelimitedHints;
@@ -5,6 +7,10 @@ use crate::wire::{Field, Message, Value};
 
 const MAX_PREVIEW_BYTES: usize = 24;
 
+/// Render a decoded message as a recursive text dump.
+///
+/// `max_depth` controls how deeply length-delimited nested-message candidates
+/// are expanded.
 pub fn dump_message(message: &Message, max_depth: usize) -> String {
     let mut out = String::new();
     dump_message_inner(&mut out, message, 0, max_depth);

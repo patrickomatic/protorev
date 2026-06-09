@@ -1,20 +1,32 @@
+//! Error types for `protorev`.
+
 use std::fmt::{Display, Formatter};
 
+/// Errors produced by protobuf decoding and CLI file IO.
 #[derive(Debug)]
 pub enum Error {
+    /// Filesystem error.
     Io(std::io::Error),
+    /// Human-readable command or validation error.
     Message(String),
+    /// The input ended before the current wire value was complete.
     Truncated {
+        /// Value being decoded.
         context: &'static str,
+        /// Byte offset where the decoder needed more input.
         offset: usize,
     },
+    /// The input was not valid for the supported protobuf wire subset.
     InvalidWire {
+        /// Static explanation of the invalid condition.
         reason: &'static str,
+        /// Byte offset where the invalid condition was detected.
         offset: usize,
     },
 }
 
 impl Error {
+    /// Create a plain message error.
     pub fn message(value: impl Into<String>) -> Self {
         Self::Message(value.into())
     }

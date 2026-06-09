@@ -1,12 +1,29 @@
+//! Raw protobuf wire decoding.
+//!
+//! This module intentionally stays schema-less. It exposes the wire type and
+//! exact byte offsets for every field so higher layers can reason about samples
+//! without losing the evidence needed to revisit a hypothesis.
+
 use crate::Error;
 
+/// A decoded protobuf message.
+///
+/// `len` is the length of the input slice. Every field offset is relative to
+/// the start of that same slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
+    /// Fields in wire order.
     pub fields: Vec<Field>,
+    /// Total decoded message length in bytes.
     pub len: usize,
 }
 
 impl Message {
+    /// Decode one complete raw protobuf message.
+    ///
+    /// The decoder accepts only the wire types that carry real protobuf field
+    /// payloads: varint, fixed64, length-delimited, and fixed32. Deprecated
+    /// groups are rejected as unsupported wire types.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let mut cursor = 0;
         let mut fields = Vec::new();
@@ -22,13 +39,20 @@ impl Message {
     }
 }
 
+/// One decoded protobuf field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
+    /// Schema field number encoded in the tag.
     pub number: u32,
+    /// Wire type encoded in the tag.
     pub wire_type: WireType,
+    /// Offset where the tag varint begins.
     pub tag_offset: usize,
+    /// Offset immediately after the tag varint.
     pub value_offset: usize,
+    /// Offset immediately after the field value.
     pub end_offset: usize,
+    /// Decoded raw value.
     pub value: Value,
 }
 
@@ -85,11 +109,16 @@ impl Field {
     }
 }
 
+/// Supported protobuf wire types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WireType {
+    /// Wire type 0.
     Varint,
+    /// Wire type 1.
     Fixed64,
+    /// Wire type 2.
     LengthDelimited,
+    /// Wire type 5.
     Fixed32,
 }
 
@@ -107,6 +136,7 @@ impl WireType {
         }
     }
 
+    /// Human-readable wire type name used in dumps and summaries.
     pub fn name(self) -> &'static str {
         match self {
             Self::Varint => "varint",
@@ -116,6 +146,7 @@ impl WireType {
         }
     }
 
+    /// Conservative scalar type used when emitting a draft `.proto`.
     pub fn proto_scalar(self) -> &'static str {
         match self {
             Self::Varint => "uint64",
@@ -126,14 +157,20 @@ impl WireType {
     }
 }
 
+/// Decoded raw protobuf field value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
+    /// Wire type 0 value.
     Varint(u64),
+    /// Wire type 1 value, little-endian on the wire.
     Fixed64(u64),
+    /// Wire type 2 payload bytes, without the length prefix.
     LengthDelimited(Vec<u8>),
+    /// Wire type 5 value, little-endian on the wire.
     Fixed32(u32),
 }
 
+/// Read a protobuf varint from `bytes`, advancing `cursor`.
 pub fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, Error> {
     let start = *cursor;
     let mut shift = 0u32;
@@ -190,6 +227,9 @@ fn read_fixed64(bytes: &[u8], cursor: &mut usize) -> Result<u64, Error> {
     ]))
 }
 
+/// Append `value` as a protobuf varint.
+///
+/// This is public mostly for tests and small fixture builders.
 pub fn push_varint(out: &mut Vec<u8>, mut value: u64) {
     loop {
         let mut byte = u8::try_from(value & 0x7f).unwrap_or(0);

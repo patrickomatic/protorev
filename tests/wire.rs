@@ -1,5 +1,9 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use protorev::wire::push_varint;
-use protorev::{Corpus, Message, Value, dump_message};
+use protorev::{Corpus, Error, LengthDelimitedHints, Message, Value, WireType, dump_message};
 
 #[test]
 fn decodes_basic_wire_fields_with_offsets() -> Result<(), protorev::Error> {
@@ -23,6 +27,37 @@ fn decodes_basic_wire_fields_with_offsets() -> Result<(), protorev::Error> {
 }
 
 #[test]
+fn decodes_fixed_width_fields() -> Result<(), protorev::Error> {
+    let mut bytes = Vec::new();
+    push_field_tag(&mut bytes, 3, 1);
+    bytes.extend_from_slice(&0x0102_0304_0506_0708_u64.to_le_bytes());
+    push_field_tag(&mut bytes, 4, 5);
+    bytes.extend_from_slice(&0x0a0b_0c0d_u32.to_le_bytes());
+
+    let message = Message::decode(&bytes)?;
+
+    assert_eq!(message.fields[0].wire_type, WireType::Fixed64);
+    assert_eq!(
+        message.fields[0].value,
+        Value::Fixed64(0x0102_0304_0506_0708)
+    );
+    assert_eq!(message.fields[1].wire_type, WireType::Fixed32);
+    assert_eq!(message.fields[1].value, Value::Fixed32(0x0a0b_0c0d));
+
+    Ok(())
+}
+
+#[test]
+fn rejects_invalid_and_truncated_wire_streams() {
+    assert_invalid_wire(&[0x00], "field tag cannot be zero");
+    assert_invalid_wire(&[0x0b], "unsupported wire type");
+    assert_truncated(&[0x80], "truncated varint at offset 1");
+    assert_truncated(&[0x0a, 0x03, b'a'], "truncated length-delimited field");
+    assert_truncated(&[0x09, 1, 2], "truncated fixed64");
+    assert_truncated(&[0x15, 1, 2], "truncated fixed32");
+}
+
+#[test]
 fn dump_marks_nested_utf8_and_packed_candidates() -> Result<(), protorev::Error> {
     let nested = message_bytes(&[(1, 0, 7)]);
     let mut bytes = Vec::new();
@@ -38,6 +73,23 @@ fn dump_marks_nested_utf8_and_packed_candidates() -> Result<(), protorev::Error>
     assert!(dump.contains("field 1 varint = 7"));
 
     Ok(())
+}
+
+#[test]
+fn length_delimited_hints_keep_ambiguous_candidates_visible() {
+    let nested = message_bytes(&[(1, 0, 7)]);
+    let nested_hints = LengthDelimitedHints::classify(&nested);
+    assert!(nested_hints.nested_message.is_some());
+    assert_eq!(nested_hints.packed_varints, Some(vec![8, 7]));
+    assert_eq!(nested_hints.utf8, None);
+
+    let text_hints = LengthDelimitedHints::classify(b"title");
+    assert_eq!(text_hints.utf8.as_deref(), Some("title"));
+    assert_eq!(text_hints.packed_varints, None);
+
+    let control_hints = LengthDelimitedHints::classify(&[0x01, 0x02]);
+    assert_eq!(control_hints.utf8, None);
+    assert_eq!(control_hints.packed_varints, Some(vec![1, 2]));
 }
 
 #[test]
@@ -61,6 +113,75 @@ fn corpus_emits_draft_proto_with_nested_messages() -> Result<(), protorev::Error
     Ok(())
 }
 
+#[test]
+fn corpus_marks_repeated_and_optional_fields() -> Result<(), protorev::Error> {
+    let mut first = Vec::new();
+    push_varint_field(&mut first, 1, 10);
+    push_varint_field(&mut first, 1, 11);
+    push_fixed32_field(&mut first, 2, 4);
+
+    let mut second = Vec::new();
+    push_varint_field(&mut second, 1, 12);
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let summary = corpus.summary();
+    let draft = corpus.draft_proto();
+
+    assert!(summary.contains("field 1: observed 2/2 samples"));
+    assert!(summary.contains("max/sample: 2 repeated"));
+    assert!(summary.contains("field 2: observed 1/2 samples"));
+    assert!(draft.contains("repeated uint64 field_1 = 1;"));
+    assert!(draft.contains("fixed32 field_2 = 2;"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
+    let mut first = Vec::new();
+    push_varint_field(&mut first, 1, 150);
+    push_len_field(&mut first, 2, b"title");
+
+    let mut second = Vec::new();
+    push_varint_field(&mut second, 1, 151);
+    push_len_field(&mut second, 2, b"title");
+
+    let first_path = write_sample("first", &first)?;
+    let second_path = write_sample("second", &second)?;
+
+    let dump = run_protorev(["dump", path_str(&first_path)?])?;
+    assert_success(&dump);
+    let dump_stdout = String::from_utf8(dump.stdout)?;
+    assert!(dump_stdout.contains("field 1 varint = 150"));
+    assert!(dump_stdout.contains("field 2 length-delimited len=5 [utf8]"));
+
+    let infer = run_protorev(["infer", path_str(&first_path)?, path_str(&second_path)?])?;
+    assert_success(&infer);
+    let infer_stdout = String::from_utf8(infer.stdout)?;
+    assert!(infer_stdout.contains("samples: 2"));
+    assert!(infer_stdout.contains("--- draft proto ---"));
+    assert!(infer_stdout.contains("uint64 field_1 = 1;"));
+
+    let diff = run_protorev(["diff", path_str(&first_path)?, path_str(&second_path)?])?;
+    assert_success(&diff);
+    let diff_stdout = String::from_utf8(diff.stdout)?;
+    assert!(diff_stdout.contains("field 1: observed 2/2 samples"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_reports_usage_errors() -> Result<(), Box<dyn std::error::Error>> {
+    let output = run_protorev(["dump"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("usage: protorev dump <file.pb>"));
+
+    Ok(())
+}
+
 fn message_bytes(fields: &[(u32, u8, u64)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (number, wire_type, value) in fields {
@@ -68,6 +189,16 @@ fn message_bytes(fields: &[(u32, u8, u64)]) -> Vec<u8> {
         push_varint(&mut out, *value);
     }
     out
+}
+
+fn push_varint_field(out: &mut Vec<u8>, number: u32, value: u64) {
+    push_field_tag(out, number, 0);
+    push_varint(out, value);
+}
+
+fn push_fixed32_field(out: &mut Vec<u8>, number: u32, value: u32) {
+    push_field_tag(out, number, 5);
+    out.extend_from_slice(&value.to_le_bytes());
 }
 
 fn push_len_field(out: &mut Vec<u8>, number: u32, value: &[u8]) {
@@ -78,4 +209,60 @@ fn push_len_field(out: &mut Vec<u8>, number: u32, value: &[u8]) {
 
 fn push_field_tag(out: &mut Vec<u8>, number: u32, wire_type: u8) {
     push_varint(out, u64::from((number << 3) | u32::from(wire_type)));
+}
+
+fn assert_invalid_wire(bytes: &[u8], reason: &str) {
+    let error = Message::decode(bytes).err();
+    assert!(matches!(
+        error,
+        Some(Error::InvalidWire {
+            reason: actual,
+            ..
+        }) if actual == reason
+    ));
+}
+
+fn assert_truncated(bytes: &[u8], text: &str) {
+    let error = Message::decode(bytes)
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(error.contains(text), "{error}");
+}
+
+fn write_sample(name: &str, bytes: &[u8]) -> Result<PathBuf, std::io::Error> {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "protorev-{name}-{}-{}.pb",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn unique_suffix() -> u128 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos(),
+        Err(_) => 0,
+    }
+}
+
+fn path_str(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
+    path.to_str()
+        .ok_or_else(|| String::from("sample path was not valid UTF-8").into())
+}
+
+fn run_protorev<const N: usize>(args: [&str; N]) -> Result<std::process::Output, std::io::Error> {
+    Command::new(env!("CARGO_BIN_EXE_protorev"))
+        .args(args)
+        .output()
+}
+
+fn assert_success(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

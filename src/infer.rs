@@ -1,9 +1,17 @@
+//! Corpus-level protobuf shape inference.
+//!
+//! This module aggregates decoded samples into field-presence summaries and a
+//! conservative draft `.proto`. It deliberately avoids semantic scalar
+//! inference: values are typed by wire type unless a length-delimited field is
+//! consistently observed as a nested message candidate.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::classify::LengthDelimitedHints;
 use crate::wire::{Message, Value, WireType};
 
+/// A nested field path, such as `1.4.2`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FieldPath(Vec<u32>);
 
@@ -39,6 +47,7 @@ impl FieldPath {
     }
 }
 
+/// Aggregated observations from a set of decoded messages.
 #[derive(Debug, Clone, Default)]
 pub struct Corpus {
     sample_count: usize,
@@ -47,6 +56,9 @@ pub struct Corpus {
 }
 
 impl Corpus {
+    /// Build a corpus from decoded sample messages.
+    ///
+    /// `max_depth` limits recursive nested-message candidate aggregation.
     pub fn from_messages(messages: &[Message], max_depth: usize) -> Self {
         let mut corpus = Self {
             sample_count: messages.len(),
@@ -62,6 +74,7 @@ impl Corpus {
         corpus
     }
 
+    /// Produce a human-readable field presence summary.
     pub fn summary(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "samples: {}", self.sample_count);
@@ -76,6 +89,11 @@ impl Corpus {
         out
     }
 
+    /// Emit a conservative draft `.proto`.
+    ///
+    /// The result is intended as a starting point for human review, not a final
+    /// schema. Field names are synthetic and comments carry the observation
+    /// counts that led to each emitted line.
     pub fn draft_proto(&self) -> String {
         let mut out = String::new();
         out.push_str("syntax = \"proto3\";\n\n");
