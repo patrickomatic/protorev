@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::fmt::{Display, Formatter};
 
 use crate::classify::LengthDelimitedHints;
 use crate::wire::{Message, Value, WireType};
@@ -18,6 +19,27 @@ use crate::wire::{Message, Value, WireType};
 pub struct FieldPath(Vec<u32>);
 
 impl FieldPath {
+    /// Parse a dotted field path, such as `1` or `3.1`.
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut path = Vec::new();
+        for part in value.split('.') {
+            if part.is_empty() {
+                return None;
+            }
+            let number = part.parse::<u32>().ok()?;
+            if number == 0 {
+                return None;
+            }
+            path.push(number);
+        }
+
+        if path.is_empty() {
+            None
+        } else {
+            Some(Self(path))
+        }
+    }
+
     fn root_field(number: u32) -> Self {
         Self(vec![number])
     }
@@ -46,6 +68,18 @@ impl FieldPath {
             Some(number) => format!("field_{number}"),
             None => "field".to_owned(),
         }
+    }
+}
+
+impl Display for FieldPath {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        for (index, number) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(".")?;
+            }
+            write!(formatter, "{number}")?;
+        }
+        Ok(())
     }
 }
 
@@ -177,6 +211,87 @@ impl Corpus {
         }
 
         out
+    }
+
+    /// Explain the evidence for one field path.
+    pub fn explain(&self, path: &FieldPath) -> Option<String> {
+        let (parent_stats, field) = self.field_stats(path)?;
+        let mut out = String::new();
+        let confidence = field.confidence(parent_stats.message_observations);
+        let type_name = self.schema_type_name(field, path);
+
+        let _ = writeln!(out, "field {path}");
+        let _ = writeln!(out, "  name: {}", path.field_name());
+        let _ = writeln!(out, "  schema type: {type_name}");
+        let _ = writeln!(out, "  confidence: {}", confidence.label());
+        let _ = writeln!(
+            out,
+            "  observed: {}/{} relevant messages",
+            field.samples_seen, parent_stats.message_observations
+        );
+        let _ = writeln!(out, "  occurrences: {}", field.occurrence_count);
+        let _ = writeln!(
+            out,
+            "  max occurrences per message: {}",
+            field.max_occurrences_per_sample
+        );
+        let _ = writeln!(out, "  wire types: {}", field.wire_summary());
+        let _ = writeln!(out, "  evidence: {}", field.evidence_summary());
+        let _ = writeln!(
+            out,
+            "  included at high threshold: {}",
+            yes_no(confidence >= Confidence::High)
+        );
+        let _ = writeln!(
+            out,
+            "  included at medium threshold: {}",
+            yes_no(confidence >= Confidence::Medium)
+        );
+        let _ = writeln!(
+            out,
+            "  included at low threshold: {}",
+            yes_no(confidence >= Confidence::Low)
+        );
+
+        Some(out)
+    }
+
+    /// Explain one field path as JSON.
+    pub fn explain_json(&self, path: &FieldPath) -> Option<String> {
+        let (parent_stats, field) = self.field_stats(path)?;
+        let confidence = field.confidence(parent_stats.message_observations);
+        let type_name = self.schema_type_name(field, path);
+        let mut out = String::new();
+
+        let _ = write!(
+            out,
+            "{{\"path\":\"{path}\",\"name\":\"{}\",\"schema_type\":\"{}\",\"confidence\":\"{}\",\"observed_messages\":{},\"relevant_messages\":{},\"occurrences\":{},\"max_occurrences_per_message\":{},\"wire_types\":[",
+            path.field_name(),
+            type_name,
+            confidence.label(),
+            field.samples_seen,
+            parent_stats.message_observations,
+            field.occurrence_count,
+            field.max_occurrences_per_sample
+        );
+        for (index, wire_type) in field.wire_types.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "\"{}\"", wire_type.name());
+        }
+        let _ = write!(
+            out,
+            "],\"length_delimited\":{{\"nested_message_occurrences\":{},\"utf8_occurrences\":{},\"packed_varint_occurrences\":{}}},\"included\":{{\"high\":{},\"medium\":{},\"low\":{}}}}}",
+            field.nested_message_occurrences,
+            field.utf8_occurrences,
+            field.packed_varint_occurrences,
+            confidence >= Confidence::High,
+            confidence >= Confidence::Medium,
+            confidence >= Confidence::Low
+        );
+
+        Some(out)
     }
 
     fn observe_nested_message(&mut self, message: &Message, max_depth: usize) {
@@ -331,6 +446,21 @@ impl Corpus {
             field.primary_wire_type().proto_scalar().to_owned()
         }
     }
+
+    fn field_stats(&self, path: &FieldPath) -> Option<(&MessageStats, &FieldStats)> {
+        let number = *path.0.last()?;
+        let parent = if path.0.len() == 1 {
+            &self.root
+        } else {
+            let parent_path = FieldPath(path.0[..path.0.len() - 1].to_vec());
+            self.nested.get(&parent_path)?
+        };
+        parent.fields.get(&number).map(|field| (parent, field))
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 #[derive(Debug, Clone, Default)]

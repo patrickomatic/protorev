@@ -15,8 +15,10 @@ and a draft schema that stays honest about what was observed.
 
 ```bash
 cargo run -p protorev -- dump sample.pb
+cargo run -p protorev -- dump --json sample.pb
 cargo run -p protorev -- infer samples/*.pb
 cargo run -p protorev -- schema samples/*.pb
+cargo run -p protorev -- explain --field 3.1 samples/*.pb
 cargo run -p protorev -- diff before.pb after.pb
 ```
 
@@ -39,6 +41,12 @@ For length-delimited fields, `protorev` reports any candidates that match:
 These are candidates, not schema facts. A short byte string can legitimately
 look like more than one thing.
 
+Use `--json` when another tool needs offsets, raw values, and hints:
+
+```bash
+cargo run -p protorev -- dump --json sample.pb
+```
+
 ### `infer`
 
 `infer` reads multiple samples, aggregates field presence, marks fields as
@@ -58,6 +66,25 @@ syntax = "proto3";
 message Message {
   Message_1 field_1 = 1; // observed 2/2 samples; wires: length-delimited
 }
+```
+
+### `explain`
+
+`explain` reports the evidence behind one field path:
+
+```bash
+cargo run -p protorev -- explain --field 3.1 samples/*.pb
+```
+
+The output names the synthetic field, schema type, confidence, observation
+counts, wire types, length-delimited candidates, and whether the field would be
+included at high/medium/low schema thresholds. Use dotted paths for nested
+message candidates.
+
+For tooling, add `--json`:
+
+```bash
+cargo run -p protorev -- explain --json --field 3.1 samples/*.pb
 ```
 
 ### `diff`

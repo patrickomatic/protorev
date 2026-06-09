@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use protorev::wire::push_varint;
 use protorev::{
     Confidence, Corpus, Error, LengthDelimitedHints, Message, SchemaOptions, Value, WireType,
-    dump_message,
+    dump_message, dump_message_json,
 };
 
 #[test]
@@ -74,6 +74,27 @@ fn dump_marks_nested_utf8_and_packed_candidates() -> Result<(), protorev::Error>
     assert!(dump.contains("field 2 length-delimited len=5 [utf8]"));
     assert!(dump.contains("field 3 length-delimited len=3 [packed-varint]"));
     assert!(dump.contains("field 1 varint = 7"));
+
+    Ok(())
+}
+
+#[test]
+fn dump_json_exposes_offsets_values_and_hints() -> Result<(), protorev::Error> {
+    let nested = message_bytes(&[(1, 0, 7)]);
+    let mut bytes = Vec::new();
+    push_varint_field(&mut bytes, 1, 150);
+    push_len_field(&mut bytes, 2, b"title");
+    push_len_field(&mut bytes, 3, &nested);
+
+    let json = dump_message_json(&Message::decode(&bytes)?, 2);
+
+    assert!(json.starts_with("{\"len\":"));
+    assert!(json.contains("\"number\":1"));
+    assert!(json.contains("\"kind\":\"varint\",\"value\":150"));
+    assert!(json.contains("\"wire_type\":\"length-delimited\""));
+    assert!(json.contains("\"text\":\"title\""));
+    assert!(json.contains("\"message\":true"));
+    assert!(json.contains("\"nested\":{\"len\":2"));
 
     Ok(())
 }
@@ -242,6 +263,39 @@ fn schema_uses_bytes_when_length_delimited_shape_is_not_consistent() -> Result<(
 }
 
 #[test]
+fn explain_reports_field_evidence_by_path() -> Result<(), protorev::Error> {
+    let nested = message_bytes(&[(1, 0, 7)]);
+    let mut first = Vec::new();
+    push_len_field(&mut first, 3, &nested);
+
+    let mut second = Vec::new();
+    push_len_field(&mut second, 3, &nested);
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let path = protorev::FieldPath::parse("3.1")
+        .ok_or_else(|| protorev::Error::message("test field path should parse"))?;
+    let explanation = corpus
+        .explain(&path)
+        .ok_or_else(|| protorev::Error::message("test field path should be observed"))?;
+    let json = corpus
+        .explain_json(&path)
+        .ok_or_else(|| protorev::Error::message("test field path should be observed"))?;
+
+    assert!(explanation.contains("field 3.1"));
+    assert!(explanation.contains("schema type: uint64"));
+    assert!(explanation.contains("confidence: high"));
+    assert!(explanation.contains("included at high threshold: yes"));
+
+    assert!(json.contains("\"path\":\"3.1\""));
+    assert!(json.contains("\"schema_type\":\"uint64\""));
+    assert!(json.contains("\"confidence\":\"high\""));
+    assert!(json.contains("\"high\":true"));
+
+    Ok(())
+}
+
+#[test]
 fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Vec::new();
     push_varint_field(&mut first, 1, 150);
@@ -260,6 +314,12 @@ fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error
     assert!(dump_stdout.contains("field 1 varint = 150"));
     assert!(dump_stdout.contains("field 2 length-delimited len=5 [utf8]"));
 
+    let dump_json = run_protorev(["dump", "--json", path_str(&first_path)?])?;
+    assert_success(&dump_json);
+    let dump_json_stdout = String::from_utf8(dump_json.stdout)?;
+    assert!(dump_json_stdout.contains("\"number\":1"));
+    assert!(dump_json_stdout.contains("\"kind\":\"varint\",\"value\":150"));
+
     let infer = run_protorev(["infer", path_str(&first_path)?, path_str(&second_path)?])?;
     assert_success(&infer);
     let infer_stdout = String::from_utf8(infer.stdout)?;
@@ -271,6 +331,31 @@ fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error
     assert_success(&schema);
     let schema_stdout = String::from_utf8(schema.stdout)?;
     assert!(schema_stdout.contains("uint64 field_1 = 1; // confidence: high"));
+
+    let explain = run_protorev([
+        "explain",
+        "--field",
+        "1",
+        path_str(&first_path)?,
+        path_str(&second_path)?,
+    ])?;
+    assert_success(&explain);
+    let explain_stdout = String::from_utf8(explain.stdout)?;
+    assert!(explain_stdout.contains("field 1"));
+    assert!(explain_stdout.contains("confidence: high"));
+
+    let explain_json = run_protorev([
+        "explain",
+        "--json",
+        "--field",
+        "1",
+        path_str(&first_path)?,
+        path_str(&second_path)?,
+    ])?;
+    assert_success(&explain_json);
+    let explain_json_stdout = String::from_utf8(explain_json.stdout)?;
+    assert!(explain_json_stdout.contains("\"path\":\"1\""));
+    assert!(explain_json_stdout.contains("\"confidence\":\"high\""));
 
     let diff = run_protorev(["diff", path_str(&first_path)?, path_str(&second_path)?])?;
     assert_success(&diff);
@@ -286,7 +371,7 @@ fn cli_reports_usage_errors() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("usage: protorev dump <file.pb>"));
+    assert!(stderr.contains("usage: protorev dump [--json] <file.pb>"));
 
     Ok(())
 }
