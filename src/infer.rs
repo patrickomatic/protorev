@@ -1,9 +1,11 @@
 //! Corpus-level protobuf shape inference.
 //!
 //! This module aggregates decoded samples into field-presence summaries and a
-//! conservative draft `.proto`. It deliberately avoids semantic scalar
-//! inference: values are typed by wire type unless a length-delimited field is
-//! consistently observed as a nested message candidate.
+//! conservative draft `.proto`. It can also emit a stricter schema view that
+//! includes only fields that meet a requested confidence threshold. It
+//! deliberately avoids semantic scalar inference: values are typed by wire type
+//! unless a length-delimited field is consistently observed as a nested message
+//! candidate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -55,6 +57,52 @@ pub struct Corpus {
     nested: BTreeMap<FieldPath, MessageStats>,
 }
 
+/// Confidence threshold for schema emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    /// Include unstable or sparsely observed fields.
+    Low,
+    /// Include fields with stable wire types but incomplete sample coverage.
+    Medium,
+    /// Include fields with stable wire types observed in every relevant sample.
+    High,
+}
+
+impl Confidence {
+    /// Parse a CLI/API confidence label.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Options controlling conservative schema emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaOptions {
+    /// Lowest field confidence included in the emitted schema.
+    pub min_confidence: Confidence,
+}
+
+impl Default for SchemaOptions {
+    fn default() -> Self {
+        Self {
+            min_confidence: Confidence::High,
+        }
+    }
+}
+
 impl Corpus {
     /// Build a corpus from decoded sample messages.
     ///
@@ -79,11 +127,11 @@ impl Corpus {
         let mut out = String::new();
         let _ = writeln!(out, "samples: {}", self.sample_count);
         out.push_str("\nroot:\n");
-        self.root.write_summary(&mut out, 1, self.sample_count);
+        self.root.write_summary(&mut out, 1);
 
         for (path, stats) in &self.nested {
             let _ = writeln!(out, "\n{}:", path.message_name());
-            stats.write_summary(&mut out, 1, self.sample_count);
+            stats.write_summary(&mut out, 1);
         }
 
         out
@@ -101,6 +149,31 @@ impl Corpus {
 
         for (path, stats) in &self.nested {
             self.write_message_proto(&mut out, &path.message_name(), stats, Some(path));
+        }
+
+        out
+    }
+
+    /// Emit a confidence-gated `.proto` schema.
+    ///
+    /// Unlike [`Corpus::draft_proto`], this omits fields whose observed shape
+    /// does not meet `options.min_confidence`. The result is still a structural
+    /// schema, not a reconstruction of the producer's original `.proto`.
+    pub fn schema(&self, options: &SchemaOptions) -> String {
+        let mut out = String::new();
+        out.push_str("syntax = \"proto3\";\n\n");
+        self.write_schema_message(&mut out, "Message", &self.root, None, *options);
+
+        for (path, stats) in &self.nested {
+            if self.message_has_schema_fields(stats, Some(path), *options) {
+                self.write_schema_message(
+                    &mut out,
+                    &path.message_name(),
+                    stats,
+                    Some(path),
+                    *options,
+                );
+            }
         }
 
         out
@@ -181,15 +254,94 @@ impl Corpus {
         }
         out.push_str("}\n\n");
     }
+
+    fn write_schema_message(
+        &self,
+        out: &mut String,
+        name: &str,
+        stats: &MessageStats,
+        path: Option<&FieldPath>,
+        options: SchemaOptions,
+    ) {
+        let _ = writeln!(out, "message {name} {{");
+        let mut emitted = false;
+        for (number, field) in &stats.fields {
+            let confidence = field.confidence(stats.message_observations);
+            if confidence < options.min_confidence {
+                continue;
+            }
+
+            let child_path = match path {
+                Some(parent) => parent.child(*number),
+                None => FieldPath::root_field(*number),
+            };
+            let type_name = self.schema_type_name(field, &child_path);
+            let label = if field.max_occurrences_per_sample > 1 {
+                "repeated "
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "  {label}{type_name} {} = {}; // confidence: {}; observed {}/{} samples; wires: {}; {}",
+                child_path.field_name(),
+                number,
+                confidence.label(),
+                field.samples_seen,
+                stats.message_observations,
+                field.wire_summary(),
+                field.evidence_summary()
+            );
+            emitted = true;
+        }
+
+        if !emitted {
+            let _ = writeln!(
+                out,
+                "  // No fields met confidence threshold {}.",
+                options.min_confidence.label()
+            );
+        }
+
+        out.push_str("}\n\n");
+    }
+
+    fn message_has_schema_fields(
+        &self,
+        stats: &MessageStats,
+        path: Option<&FieldPath>,
+        options: SchemaOptions,
+    ) -> bool {
+        stats.fields.iter().any(|(number, field)| {
+            let child_path = match path {
+                Some(parent) => parent.child(*number),
+                None => FieldPath::root_field(*number),
+            };
+            field.confidence(stats.message_observations) >= options.min_confidence
+                || self.nested.get(&child_path).is_some_and(|nested| {
+                    self.message_has_schema_fields(nested, Some(&child_path), options)
+                })
+        })
+    }
+
+    fn schema_type_name(&self, field: &FieldStats, child_path: &FieldPath) -> String {
+        if field.is_consistent_nested_message() && self.nested.contains_key(child_path) {
+            child_path.message_name()
+        } else {
+            field.primary_wire_type().proto_scalar().to_owned()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct MessageStats {
+    message_observations: usize,
     fields: BTreeMap<u32, FieldStats>,
 }
 
 impl MessageStats {
     fn observe(&mut self, message: &Message) {
+        self.message_observations += 1;
         let mut counts = BTreeMap::<u32, usize>::new();
         for field in &message.fields {
             counts
@@ -199,8 +351,7 @@ impl MessageStats {
             self.fields
                 .entry(field.number)
                 .or_default()
-                .wire_types
-                .insert(field.wire_type);
+                .observe_field(field);
         }
 
         for (number, count) in counts {
@@ -210,7 +361,7 @@ impl MessageStats {
         }
     }
 
-    fn write_summary(&self, out: &mut String, indent: usize, sample_count: usize) {
+    fn write_summary(&self, out: &mut String, indent: usize) {
         let padding = "  ".repeat(indent);
         for (number, field) in &self.fields {
             let repeated = if field.max_occurrences_per_sample > 1 {
@@ -222,7 +373,7 @@ impl MessageStats {
                 out,
                 "{padding}field {number}: observed {}/{} samples; wires: {}; max/sample: {}{}",
                 field.samples_seen,
-                sample_count,
+                self.message_observations,
                 field.wire_summary(),
                 field.max_occurrences_per_sample,
                 repeated
@@ -234,11 +385,56 @@ impl MessageStats {
 #[derive(Debug, Clone, Default)]
 struct FieldStats {
     samples_seen: usize,
+    occurrence_count: usize,
     max_occurrences_per_sample: usize,
     wire_types: BTreeSet<WireType>,
+    nested_message_occurrences: usize,
+    utf8_occurrences: usize,
+    packed_varint_occurrences: usize,
 }
 
 impl FieldStats {
+    fn observe_field(&mut self, field: &crate::wire::Field) {
+        self.occurrence_count += 1;
+        self.wire_types.insert(field.wire_type);
+
+        let Value::LengthDelimited(bytes) = &field.value else {
+            return;
+        };
+        let hints = LengthDelimitedHints::classify(bytes);
+        if hints.nested_message.is_some() {
+            self.nested_message_occurrences += 1;
+        }
+        if hints.utf8.is_some() {
+            self.utf8_occurrences += 1;
+        }
+        if hints.packed_varints.is_some() {
+            self.packed_varint_occurrences += 1;
+        }
+    }
+
+    fn confidence(&self, message_observations: usize) -> Confidence {
+        if self.samples_seen == 0 || self.wire_types.len() != 1 {
+            return Confidence::Low;
+        }
+
+        if message_observations < 2 {
+            return Confidence::Medium;
+        }
+
+        if self.samples_seen == message_observations {
+            Confidence::High
+        } else {
+            Confidence::Medium
+        }
+    }
+
+    fn is_consistent_nested_message(&self) -> bool {
+        self.primary_wire_type() == WireType::LengthDelimited
+            && self.occurrence_count > 0
+            && self.nested_message_occurrences == self.occurrence_count
+    }
+
     fn primary_wire_type(&self) -> WireType {
         self.wire_types
             .iter()
@@ -253,5 +449,22 @@ impl FieldStats {
             .map(|wire| wire.name())
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    fn evidence_summary(&self) -> String {
+        if self.primary_wire_type() != WireType::LengthDelimited {
+            return format!("occurrences: {}", self.occurrence_count);
+        }
+
+        format!(
+            "occurrences: {}; nested: {}/{}; utf8: {}/{}; packed-varint: {}/{}",
+            self.occurrence_count,
+            self.nested_message_occurrences,
+            self.occurrence_count,
+            self.utf8_occurrences,
+            self.occurrence_count,
+            self.packed_varint_occurrences,
+            self.occurrence_count
+        )
     }
 }

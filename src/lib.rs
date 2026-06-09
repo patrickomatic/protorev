@@ -10,7 +10,7 @@
 //! candidate, but not a proof that the producer's schema used a message type.
 //!
 //! ```
-//! use protorev::{Corpus, Message, Value, dump_message};
+//! use protorev::{Corpus, Message, SchemaOptions, Value, dump_message};
 //!
 //! let message = Message::decode(&[0x08, 0x96, 0x01])?;
 //! assert_eq!(message.fields[0].value, Value::Varint(150));
@@ -20,6 +20,7 @@
 //!
 //! let corpus = Corpus::from_messages(&[message], 4);
 //! assert!(corpus.draft_proto().contains("uint64 field_1 = 1;"));
+//! assert!(corpus.schema(&SchemaOptions::default()).contains("message Message"));
 //! # Ok::<(), protorev::Error>(())
 //! ```
 
@@ -32,5 +33,5 @@ pub mod wire;
 pub use classify::LengthDelimitedHints;
 pub use dump::dump_message;
 pub use error::Error;
-pub use infer::Corpus;
+pub use infer::{Confidence, Corpus, SchemaOptions};
 pub use wire::{Field, Message, Value, WireType};

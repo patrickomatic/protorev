@@ -3,7 +3,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use protorev::wire::push_varint;
-use protorev::{Corpus, Error, LengthDelimitedHints, Message, Value, WireType, dump_message};
+use protorev::{
+    Confidence, Corpus, Error, LengthDelimitedHints, Message, SchemaOptions, Value, WireType,
+    dump_message,
+};
 
 #[test]
 fn decodes_basic_wire_fields_with_offsets() -> Result<(), protorev::Error> {
@@ -138,6 +141,107 @@ fn corpus_marks_repeated_and_optional_fields() -> Result<(), protorev::Error> {
 }
 
 #[test]
+fn schema_emits_only_high_confidence_fields_by_default() -> Result<(), protorev::Error> {
+    let nested = message_bytes(&[(1, 0, 7)]);
+    let mut first = Vec::new();
+    push_len_field(&mut first, 1, &nested);
+    push_varint_field(&mut first, 2, 10);
+    push_varint_field(&mut first, 3, 11);
+
+    let mut second = Vec::new();
+    push_len_field(&mut second, 1, &nested);
+    push_field_tag(&mut second, 3, 5);
+    second.extend_from_slice(&4_u32.to_le_bytes());
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let schema = corpus.schema(&SchemaOptions::default());
+
+    assert!(schema.contains("Message_1 field_1 = 1; // confidence: high"));
+    assert!(schema.contains("message Message_1 {"));
+    assert!(schema.contains("uint64 field_1 = 1; // confidence: high"));
+    assert!(!schema.contains("field_2 = 2;"));
+    assert!(!schema.contains("field_3 = 3;"));
+
+    Ok(())
+}
+
+#[test]
+fn schema_threshold_controls_medium_and_low_confidence_fields() -> Result<(), protorev::Error> {
+    let mut first = Vec::new();
+    push_varint_field(&mut first, 1, 10);
+    push_varint_field(&mut first, 2, 20);
+    push_varint_field(&mut first, 4, 40);
+
+    let mut second = Vec::new();
+    push_varint_field(&mut second, 1, 11);
+    push_field_tag(&mut second, 3, 5);
+    second.extend_from_slice(&4_u32.to_le_bytes());
+    push_field_tag(&mut second, 4, 5);
+    second.extend_from_slice(&5_u32.to_le_bytes());
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let medium = corpus.schema(&SchemaOptions {
+        min_confidence: Confidence::Medium,
+    });
+    let low = corpus.schema(&SchemaOptions {
+        min_confidence: Confidence::Low,
+    });
+
+    assert!(medium.contains("uint64 field_1 = 1; // confidence: high"));
+    assert!(medium.contains("uint64 field_2 = 2; // confidence: medium"));
+    assert!(medium.contains("fixed32 field_3 = 3; // confidence: medium"));
+    assert!(!medium.contains("field_4 = 4;"));
+
+    assert!(low.contains("uint64 field_1 = 1; // confidence: high"));
+    assert!(low.contains("uint64 field_2 = 2; // confidence: medium"));
+    assert!(low.contains("fixed32 field_3 = 3; // confidence: medium"));
+    assert!(low.contains("uint64 field_4 = 4; // confidence: low"));
+
+    Ok(())
+}
+
+#[test]
+fn schema_caps_single_sample_fields_at_medium_confidence() -> Result<(), protorev::Error> {
+    let mut bytes = Vec::new();
+    push_varint_field(&mut bytes, 1, 10);
+
+    let message = Message::decode(&bytes)?;
+    let corpus = Corpus::from_messages(&[message], 2);
+    let high = corpus.schema(&SchemaOptions::default());
+    let medium = corpus.schema(&SchemaOptions {
+        min_confidence: Confidence::Medium,
+    });
+
+    assert!(high.contains("No fields met confidence threshold high"));
+    assert!(!high.contains("field_1 = 1;"));
+    assert!(medium.contains("uint64 field_1 = 1; // confidence: medium"));
+
+    Ok(())
+}
+
+#[test]
+fn schema_uses_bytes_when_length_delimited_shape_is_not_consistent() -> Result<(), protorev::Error>
+{
+    let nested = message_bytes(&[(1, 0, 7)]);
+    let mut first = Vec::new();
+    push_len_field(&mut first, 1, &nested);
+
+    let mut second = Vec::new();
+    push_len_field(&mut second, 1, b"title");
+
+    let messages = vec![Message::decode(&first)?, Message::decode(&second)?];
+    let corpus = Corpus::from_messages(&messages, 2);
+    let schema = corpus.schema(&SchemaOptions::default());
+
+    assert!(schema.contains("bytes field_1 = 1; // confidence: high"));
+    assert!(!schema.contains("Message_1 field_1 = 1;"));
+
+    Ok(())
+}
+
+#[test]
 fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Vec::new();
     push_varint_field(&mut first, 1, 150);
@@ -162,6 +266,11 @@ fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error
     assert!(infer_stdout.contains("samples: 2"));
     assert!(infer_stdout.contains("--- draft proto ---"));
     assert!(infer_stdout.contains("uint64 field_1 = 1;"));
+
+    let schema = run_protorev(["schema", path_str(&first_path)?, path_str(&second_path)?])?;
+    assert_success(&schema);
+    let schema_stdout = String::from_utf8(schema.stdout)?;
+    assert!(schema_stdout.contains("uint64 field_1 = 1; // confidence: high"));
 
     let diff = run_protorev(["diff", path_str(&first_path)?, path_str(&second_path)?])?;
     assert_success(&diff);

@@ -16,6 +16,7 @@ and a draft schema that stays honest about what was observed.
 ```bash
 cargo run -p protorev -- dump sample.pb
 cargo run -p protorev -- infer samples/*.pb
+cargo run -p protorev -- schema samples/*.pb
 cargo run -p protorev -- diff before.pb after.pb
 ```
 
@@ -64,6 +65,43 @@ message Message {
 `diff` is a small convenience around `infer` for two files. It gives a compact
 shape comparison for controlled before/after samples.
 
+### `schema`
+
+`schema` emits a confidence-gated structural `.proto`. By default it includes
+only high-confidence fields:
+
+```bash
+cargo run -p protorev -- schema samples/*.pb
+```
+
+High confidence currently means:
+
+- at least two relevant samples were observed
+- the field used one stable wire type
+- the field appeared in every relevant sample
+- if emitted as a nested message, every observed occurrence decoded cleanly as
+  that nested message shape
+
+For exploratory output, lower the threshold:
+
+```bash
+cargo run -p protorev -- schema --min-confidence medium samples/*.pb
+```
+
+The emitted schema is intentionally structural:
+
+```proto
+syntax = "proto3";
+
+message Message {
+  Message_1 field_1 = 1; // confidence: high; observed 2/2 samples; wires: length-delimited; occurrences: 2; nested: 2/2; utf8: 0/2; packed-varint: 2/2
+}
+```
+
+`schema` still does not invent semantic names or scalar intent. A stable varint
+is `uint64`; a stable length-delimited field is either a consistently observed
+nested message or `bytes`.
+
 ## Scope
 
 The first version handles raw protobuf wire streams:
@@ -91,6 +129,7 @@ fn main() -> Result<(), protorev::Error> {
 
     let corpus = Corpus::from_messages(&[message], 4);
     println!("{}", corpus.draft_proto());
+    println!("{}", corpus.schema(&Default::default()));
     Ok(())
 }
 ```
