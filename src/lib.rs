@@ -28,10 +28,12 @@ mod classify;
 mod dump;
 mod error;
 mod infer;
+mod manifest;
 pub mod wire;
 
 pub use classify::LengthDelimitedHints;
 pub use dump::{dump_message, dump_message_json};
 pub use error::Error;
 pub use infer::{Confidence, Corpus, FieldPath, SchemaOptions};
+pub use manifest::{Experiment, ExperimentManifest};
 pub use wire::{Field, Message, Value, WireType};

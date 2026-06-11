@@ -21,6 +21,7 @@ cargo run -p protorev -- schema samples/*.pb
 cargo run -p protorev -- explain --field 3.1 samples/*.pb
 cargo run -p protorev -- values --field 1 samples/*.pb
 cargo run -p protorev -- diff before/*.pb -- after/*.pb
+cargo run -p protorev -- experiments experiments.protorev
 ```
 
 ### `dump`
@@ -129,6 +130,36 @@ For tooling:
 
 ```bash
 cargo run -p protorev -- diff --json before/*.pb -- after/*.pb
+```
+
+### `experiments`
+
+`experiments` runs named before/after corpus comparisons from a small manifest:
+
+```bash
+cargo run -p protorev -- experiments experiments.protorev
+```
+
+Manifest paths are resolved relative to the manifest file:
+
+```toml
+[[experiment]]
+name = "add title field"
+notes = "same message source with only the title populated"
+before = ["before/empty.pb"]
+after = ["after/with-title.pb"]
+
+[[experiment]]
+name = "repeat field 7"
+before = ["single.pb"]
+after = ["repeated-a.pb", "repeated-b.pb"]
+```
+
+Each experiment prints its name, notes, sample paths, and the same structural
+diff produced by `diff`. Use JSON for stable artifacts:
+
+```bash
+cargo run -p protorev -- experiments --json experiments.protorev
 ```
 
 ### `schema`

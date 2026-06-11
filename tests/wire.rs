@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use protorev::wire::push_varint;
 use protorev::{
-    Confidence, Corpus, Error, LengthDelimitedHints, Message, SchemaOptions, Value, WireType,
-    dump_message, dump_message_json,
+    Confidence, Corpus, Error, ExperimentManifest, LengthDelimitedHints, Message, SchemaOptions,
+    Value, WireType, dump_message, dump_message_json,
 };
 
 #[test]
@@ -420,6 +420,40 @@ fn corpus_diff_reports_added_removed_and_changed_fields() -> Result<(), protorev
 }
 
 #[test]
+fn experiment_manifest_parses_named_corpora() -> Result<(), protorev::Error> {
+    let manifest = ExperimentManifest::parse(
+        r#"
+        # comments are allowed outside strings
+        [[experiment]]
+        name = "add field four"
+        notes = "controlled before/after run"
+        before = ["before.pb"]
+        after = ["after.pb", "/tmp/absolute.pb"]
+        "#,
+        "/tmp/protorev-manifest",
+    )?;
+
+    assert_eq!(manifest.experiments.len(), 1);
+    let experiment = &manifest.experiments[0];
+    assert_eq!(experiment.name, "add field four");
+    assert_eq!(
+        experiment.notes.as_deref(),
+        Some("controlled before/after run")
+    );
+    assert_eq!(
+        experiment.before[0],
+        PathBuf::from("/tmp/protorev-manifest/before.pb")
+    );
+    assert_eq!(
+        experiment.after[0],
+        PathBuf::from("/tmp/protorev-manifest/after.pb")
+    );
+    assert_eq!(experiment.after[1], PathBuf::from("/tmp/absolute.pb"));
+
+    Ok(())
+}
+
+#[test]
 fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Vec::new();
     push_varint_field(&mut first, 1, 150);
@@ -529,6 +563,55 @@ fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn cli_experiments_runs_manifest_diffs() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = temp_dir("manifest")?;
+    let before_path = dir.join("before.pb");
+    let after_path = dir.join("after.pb");
+    let manifest_path = dir.join("experiments.protorev");
+
+    let mut before = Vec::new();
+    push_varint_field(&mut before, 1, 10);
+
+    let mut after = Vec::new();
+    push_varint_field(&mut after, 1, 10);
+    push_fixed32_field(&mut after, 4, 4);
+
+    std::fs::write(&before_path, before)?;
+    std::fs::write(&after_path, after)?;
+    std::fs::write(
+        &manifest_path,
+        r#"
+        [[experiment]]
+        name = "add field four"
+        notes = "synthetic controlled change"
+        before = ["before.pb"]
+        after = ["after.pb"]
+        "#,
+    )?;
+
+    let text = run_protorev(["experiments", path_str(&manifest_path)?])?;
+    assert_success(&text);
+    let text_stdout = String::from_utf8(text.stdout)?;
+    assert!(text_stdout.contains("== add field four =="));
+    assert!(text_stdout.contains("notes: synthetic controlled change"));
+    assert!(text_stdout.contains("before samples: 1"));
+    assert!(text_stdout.contains("after samples: 1"));
+    assert!(text_stdout.contains("added:"));
+    assert!(text_stdout.contains("field 4: observed 1/1 samples"));
+
+    let json = run_protorev(["experiments", "--json", path_str(&manifest_path)?])?;
+    assert_success(&json);
+    let json_stdout = String::from_utf8(json.stdout)?;
+    assert!(json_stdout.contains("\"experiments\":["));
+    assert!(json_stdout.contains("\"name\":\"add field four\""));
+    assert!(json_stdout.contains("\"notes\":\"synthetic controlled change\""));
+    assert!(json_stdout.contains("\"before_samples\":1"));
+    assert!(json_stdout.contains("\"path\":\"4\""));
+
+    Ok(())
+}
+
+#[test]
 fn cli_reports_usage_errors() -> Result<(), Box<dyn std::error::Error>> {
     let output = run_protorev(["dump"])?;
 
@@ -595,6 +678,17 @@ fn write_sample(name: &str, bytes: &[u8]) -> Result<PathBuf, std::io::Error> {
         unique_suffix()
     ));
     std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn temp_dir(name: &str) -> Result<PathBuf, std::io::Error> {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "protorev-{name}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&path)?;
     Ok(path)
 }
 
