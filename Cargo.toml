@@ -8,6 +8,7 @@ description = "A protobuf reverse-engineering workbench"
 repository = "https://github.com/patrickomatic/protorev"
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -617,7 +617,8 @@ fn cli_reports_usage_errors() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("usage: protorev dump [--json] <file.pb>"));
+    assert!(stderr.contains("required arguments were not provided"));
+    assert!(stderr.contains("Usage: protorev dump <file.pb>"));
 
     Ok(())
 }

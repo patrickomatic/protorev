@@ -1,12 +1,103 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use protorev::{
     Confidence, Corpus, Error, Experiment, ExperimentManifest, FieldPath, Message, SchemaOptions,
     dump_message, dump_message_json,
 };
 
 const DEFAULT_MAX_DEPTH: usize = 4;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "protorev",
+    version,
+    about = "A protobuf reverse-engineering workbench"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Decode one raw protobuf message and print observed fields.
+    Dump(DumpArgs),
+    /// Aggregate field observations across a corpus and emit a draft proto.
+    Infer(FilesArgs),
+    /// Emit a confidence-gated structural proto.
+    Schema(SchemaArgs),
+    /// Explain the evidence behind one field path.
+    Explain(FieldCommandArgs),
+    /// Summarize observed values for one field path.
+    Values(FieldCommandArgs),
+    /// Compare two corpora and report structural changes.
+    Diff(DiffArgs),
+    /// Run named before/after corpus comparisons from a manifest.
+    #[command(alias = "experiment")]
+    Experiments(ExperimentsArgs),
+}
+
+#[derive(Debug, Args)]
+struct DumpArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+    /// Raw protobuf message to decode.
+    #[arg(value_name = "file.pb")]
+    file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct FilesArgs {
+    /// Raw protobuf messages to analyze.
+    #[arg(value_name = "file.pb", num_args = 1..)]
+    files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct SchemaArgs {
+    /// Lowest confidence level to include.
+    #[arg(long, value_name = "high|medium|low", value_parser = parse_confidence)]
+    min_confidence: Option<Confidence>,
+    /// Raw protobuf messages to analyze.
+    #[arg(value_name = "file.pb", num_args = 1..)]
+    files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct FieldCommandArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+    /// Dotted field path, such as 1 or 3.1.
+    #[arg(long, value_name = "path", value_parser = parse_field_path)]
+    field: FieldPath,
+    /// Raw protobuf messages to analyze.
+    #[arg(value_name = "file.pb", num_args = 1..)]
+    files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct DiffArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+    /// Before/after files. Use `--` between multi-file corpora.
+    #[arg(value_name = "PATH", num_args = 2.., trailing_var_arg = true, allow_hyphen_values = true)]
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ExperimentsArgs {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+    /// Experiment manifest to run.
+    #[arg(value_name = "manifest")]
+    manifest: PathBuf,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -16,37 +107,30 @@ fn main() {
 }
 
 fn run() -> Result<(), Error> {
-    let mut args = std::env::args().skip(1);
-    let Some(command) = args.next() else {
-        print_usage();
-        return Ok(());
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
     };
-    let paths = args.collect::<Vec<_>>();
 
-    match command.as_str() {
-        "dump" => dump_command(&paths),
-        "infer" => infer_command(&paths),
-        "schema" => schema_command(&paths),
-        "explain" => explain_command(&paths),
-        "values" => values_command(&paths),
-        "diff" => diff_command(&paths),
-        "experiments" | "experiment" => experiments_command(&paths),
-        "-h" | "--help" | "help" => {
-            print_usage();
+    match cli.command {
+        Some(Commands::Dump(args)) => dump_command(&args),
+        Some(Commands::Infer(args)) => infer_command(&args.files),
+        Some(Commands::Schema(args)) => schema_command(&args),
+        Some(Commands::Explain(args)) => explain_command(&args),
+        Some(Commands::Values(args)) => values_command(&args),
+        Some(Commands::Diff(args)) => diff_command(&args),
+        Some(Commands::Experiments(args)) => experiments_command(&args),
+        None => {
+            Cli::command().print_help()?;
+            println!();
             Ok(())
         }
-        _ => Err(Error::message(format!("unknown command {command:?}"))),
     }
 }
 
-fn dump_command(args: &[String]) -> Result<(), Error> {
-    let (json, paths) = parse_dump_args(args);
-    if paths.len() != 1 {
-        return Err(Error::message("usage: protorev dump [--json] <file.pb>"));
-    }
-
-    let message = read_message(paths[0])?;
-    if json {
+fn dump_command(args: &DumpArgs) -> Result<(), Error> {
+    let message = read_message(&args.file)?;
+    if args.json {
         println!("{}", dump_message_json(&message, DEFAULT_MAX_DEPTH));
     } else {
         print!("{}", dump_message(&message, DEFAULT_MAX_DEPTH));
@@ -54,15 +138,8 @@ fn dump_command(args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-fn infer_command(paths: &[String]) -> Result<(), Error> {
-    if paths.is_empty() {
-        return Err(Error::message("usage: protorev infer <file.pb>..."));
-    }
-
-    let mut messages = Vec::new();
-    for path in paths {
-        messages.push(read_message(path)?);
-    }
+fn infer_command(paths: &[PathBuf]) -> Result<(), Error> {
+    let messages = read_messages(paths)?;
     let corpus = Corpus::from_messages(&messages, DEFAULT_MAX_DEPTH);
     print!("{}", corpus.summary());
     println!("\n--- draft proto ---\n");
@@ -70,103 +147,70 @@ fn infer_command(paths: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-fn schema_command(args: &[String]) -> Result<(), Error> {
-    let (options, paths) = parse_schema_args(args)?;
-    if paths.is_empty() {
-        return Err(Error::message(
-            "usage: protorev schema [--min-confidence high|medium|low] <file.pb>...",
-        ));
+fn schema_command(args: &SchemaArgs) -> Result<(), Error> {
+    let mut options = SchemaOptions::default();
+    if let Some(min_confidence) = args.min_confidence {
+        options.min_confidence = min_confidence;
     }
-
-    let mut messages = Vec::new();
-    for path in paths {
-        messages.push(read_message(path)?);
-    }
+    let messages = read_messages(&args.files)?;
     let corpus = Corpus::from_messages(&messages, DEFAULT_MAX_DEPTH);
     print!("{}", corpus.schema(&options));
     Ok(())
 }
 
-fn explain_command(args: &[String]) -> Result<(), Error> {
-    let (json, field_path, paths) = parse_explain_args(args)?;
-    if paths.is_empty() {
-        return Err(Error::message(
-            "usage: protorev explain [--json] --field <path> <file.pb>...",
-        ));
-    }
-
-    let mut messages = Vec::new();
-    for path in paths {
-        messages.push(read_message(path)?);
-    }
+fn explain_command(args: &FieldCommandArgs) -> Result<(), Error> {
+    let messages = read_messages(&args.files)?;
     let corpus = Corpus::from_messages(&messages, DEFAULT_MAX_DEPTH);
-    let output = if json {
-        corpus.explain_json(&field_path)
+    let output = if args.json {
+        corpus.explain_json(&args.field)
     } else {
-        corpus.explain(&field_path)
+        corpus.explain(&args.field)
     };
     match output {
         Some(output) => {
             print!("{output}");
-            if json {
+            if args.json {
                 println!();
             }
             Ok(())
         }
         None => Err(Error::message(format!(
-            "field {field_path} was not observed in the corpus"
+            "field {} was not observed in the corpus",
+            args.field
         ))),
     }
 }
 
-fn values_command(args: &[String]) -> Result<(), Error> {
-    let (json, field_path, paths) = parse_field_path_args(
-        args,
-        "usage: protorev values [--json] --field <path> <file.pb>...",
-    )?;
-    if paths.is_empty() {
-        return Err(Error::message(
-            "usage: protorev values [--json] --field <path> <file.pb>...",
-        ));
-    }
-
-    let mut messages = Vec::new();
-    for path in paths {
-        messages.push(read_message(path)?);
-    }
+fn values_command(args: &FieldCommandArgs) -> Result<(), Error> {
+    let messages = read_messages(&args.files)?;
     let corpus = Corpus::from_messages(&messages, DEFAULT_MAX_DEPTH);
-    let output = if json {
-        corpus.values_json(&messages, &field_path)
+    let output = if args.json {
+        corpus.values_json(&messages, &args.field)
     } else {
-        corpus.values(&messages, &field_path)
+        corpus.values(&messages, &args.field)
     };
     match output {
         Some(output) => {
             print!("{output}");
-            if json {
+            if args.json {
                 println!();
             }
             Ok(())
         }
         None => Err(Error::message(format!(
-            "field {field_path} had no observed values in the corpus"
+            "field {} had no observed values in the corpus",
+            args.field
         ))),
     }
 }
 
-fn diff_command(args: &[String]) -> Result<(), Error> {
-    let (json, before_paths, after_paths) = parse_diff_args(args)?;
-    if before_paths.is_empty() || after_paths.is_empty() {
-        return Err(Error::message(
-            "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
-        ));
-    }
-
+fn diff_command(args: &DiffArgs) -> Result<(), Error> {
+    let (before_paths, after_paths) = split_diff_paths(&args.paths)?;
     let before_messages = read_messages(&before_paths)?;
     let after_messages = read_messages(&after_paths)?;
     let before = Corpus::from_messages(&before_messages, DEFAULT_MAX_DEPTH);
     let after = Corpus::from_messages(&after_messages, DEFAULT_MAX_DEPTH);
-    if json {
+    if args.json {
         println!("{}", Corpus::diff_json(&before, &after));
     } else {
         print!("{}", Corpus::diff(&before, &after));
@@ -174,10 +218,9 @@ fn diff_command(args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-fn experiments_command(args: &[String]) -> Result<(), Error> {
-    let (json, path) = parse_experiments_args(args)?;
-    let manifest = ExperimentManifest::from_file(path)?;
-    if json {
+fn experiments_command(args: &ExperimentsArgs) -> Result<(), Error> {
+    let manifest = ExperimentManifest::from_file(&args.manifest)?;
+    if args.json {
         println!("{}", experiments_json(&manifest)?);
     } else {
         print!("{}", experiments_text(&manifest)?);
@@ -185,118 +228,33 @@ fn experiments_command(args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-fn parse_schema_args(args: &[String]) -> Result<(SchemaOptions, Vec<&str>), Error> {
-    let mut options = SchemaOptions::default();
-    let mut paths = Vec::new();
-    let mut index = 0;
-
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg == "--min-confidence" {
-            let Some(value) = args.get(index + 1) else {
-                return Err(Error::message(
-                    "usage: protorev schema [--min-confidence high|medium|low] <file.pb>...",
-                ));
-            };
-            options.min_confidence = Confidence::parse(value).ok_or_else(|| {
-                Error::message("min confidence must be one of: high, medium, low")
-            })?;
-            index += 2;
-        } else {
-            paths.push(arg);
-            index += 1;
-        }
-    }
-
-    Ok((options, paths))
-}
-
-fn parse_dump_args(args: &[String]) -> (bool, Vec<&str>) {
-    let mut json = false;
-    let mut paths = Vec::new();
-
-    for arg in args {
-        if arg == "--json" {
-            json = true;
-        } else {
-            paths.push(arg.as_str());
-        }
-    }
-
-    (json, paths)
-}
-
-fn parse_explain_args(args: &[String]) -> Result<(bool, FieldPath, Vec<&str>), Error> {
-    parse_field_path_args(
-        args,
-        "usage: protorev explain [--json] --field <path> <file.pb>...",
-    )
-}
-
-fn parse_field_path_args<'a>(
-    args: &'a [String],
-    usage: &'static str,
-) -> Result<(bool, FieldPath, Vec<&'a str>), Error> {
-    let mut json = false;
-    let mut field_path = None;
-    let mut paths = Vec::new();
-    let mut index = 0;
-
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg == "--json" {
-            json = true;
-            index += 1;
-        } else if arg == "--field" {
-            let Some(value) = args.get(index + 1) else {
-                return Err(Error::message(usage));
-            };
-            field_path = FieldPath::parse(value);
-            if field_path.is_none() {
-                return Err(Error::message("field path must look like 1 or 3.1"));
-            }
-            index += 2;
-        } else {
-            paths.push(arg);
-            index += 1;
-        }
-    }
-
-    let Some(field_path) = field_path else {
-        return Err(Error::message(usage));
-    };
-
-    Ok((json, field_path, paths))
-}
-
-fn parse_diff_args(args: &[String]) -> Result<(bool, Vec<&str>, Vec<&str>), Error> {
-    let mut json = false;
+fn split_diff_paths(paths: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Error> {
     let mut separator = None;
-    let mut paths = Vec::new();
 
-    for arg in args {
-        if arg == "--json" {
-            json = true;
-        } else if arg == "--" {
+    for (index, path) in paths.iter().enumerate() {
+        if path.as_os_str().to_str() == Some("--") {
             if separator.is_some() {
                 return Err(Error::message(
                     "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
                 ));
             }
-            separator = Some(paths.len());
-        } else {
-            paths.push(arg.as_str());
+            separator = Some(index);
         }
     }
 
     if let Some(separator) = separator {
         let before = paths[..separator].to_vec();
-        let after = paths[separator..].to_vec();
-        return Ok((json, before, after));
+        let after = paths[separator + 1..].to_vec();
+        if before.is_empty() || after.is_empty() {
+            return Err(Error::message(
+                "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
+            ));
+        }
+        return Ok((before, after));
     }
 
     if paths.len() == 2 {
-        return Ok((json, vec![paths[0]], vec![paths[1]]));
+        return Ok((vec![paths[0].clone()], vec![paths[1].clone()]));
     }
 
     Err(Error::message(
@@ -304,41 +262,15 @@ fn parse_diff_args(args: &[String]) -> Result<(bool, Vec<&str>, Vec<&str>), Erro
     ))
 }
 
-fn parse_experiments_args(args: &[String]) -> Result<(bool, &str), Error> {
-    let mut json = false;
-    let mut path = None;
-
-    for arg in args {
-        if arg == "--json" {
-            json = true;
-        } else if path.is_none() {
-            path = Some(arg.as_str());
-        } else {
-            return Err(Error::message(
-                "usage: protorev experiments [--json] <manifest>",
-            ));
-        }
-    }
-
-    path.map_or_else(
-        || {
-            Err(Error::message(
-                "usage: protorev experiments [--json] <manifest>",
-            ))
-        },
-        |path| Ok((json, path)),
-    )
+fn parse_confidence(value: &str) -> Result<Confidence, String> {
+    Confidence::parse(value).ok_or_else(|| String::from("must be one of: high, medium, low"))
 }
 
-fn read_messages(paths: &[&str]) -> Result<Vec<Message>, Error> {
-    let mut messages = Vec::new();
-    for path in paths {
-        messages.push(read_message(path)?);
-    }
-    Ok(messages)
+fn parse_field_path(value: &str) -> Result<FieldPath, String> {
+    FieldPath::parse(value).ok_or_else(|| String::from("must look like 1 or 3.1"))
 }
 
-fn read_pathbuf_messages(paths: &[PathBuf]) -> Result<Vec<Message>, Error> {
+fn read_messages(paths: &[PathBuf]) -> Result<Vec<Message>, Error> {
     let mut messages = Vec::new();
     for path in paths {
         messages.push(read_message(path)?);
@@ -358,8 +290,8 @@ fn experiments_text(manifest: &ExperimentManifest) -> Result<String, Error> {
             out.push('\n');
         }
         write_experiment_header(&mut out, experiment);
-        let before_messages = read_pathbuf_messages(&experiment.before)?;
-        let after_messages = read_pathbuf_messages(&experiment.after)?;
+        let before_messages = read_messages(&experiment.before)?;
+        let after_messages = read_messages(&experiment.after)?;
         let before = Corpus::from_messages(&before_messages, DEFAULT_MAX_DEPTH);
         let after = Corpus::from_messages(&after_messages, DEFAULT_MAX_DEPTH);
         out.push('\n');
@@ -374,8 +306,8 @@ fn experiments_json(manifest: &ExperimentManifest) -> Result<String, Error> {
         if index > 0 {
             out.push(',');
         }
-        let before_messages = read_pathbuf_messages(&experiment.before)?;
-        let after_messages = read_pathbuf_messages(&experiment.after)?;
+        let before_messages = read_messages(&experiment.before)?;
+        let after_messages = read_messages(&experiment.after)?;
         let before = Corpus::from_messages(&before_messages, DEFAULT_MAX_DEPTH);
         let after = Corpus::from_messages(&after_messages, DEFAULT_MAX_DEPTH);
         let _ = write!(
@@ -442,17 +374,4 @@ fn json_escape(value: &str) -> String {
         }
     }
     out
-}
-
-fn print_usage() {
-    println!("protorev: protobuf reverse-engineering workbench");
-    println!();
-    println!("usage:");
-    println!("  protorev dump [--json] <file.pb>");
-    println!("  protorev infer <file.pb>...");
-    println!("  protorev schema [--min-confidence high|medium|low] <file.pb>...");
-    println!("  protorev explain [--json] --field <path> <file.pb>...");
-    println!("  protorev values [--json] --field <path> <file.pb>...");
-    println!("  protorev diff [--json] <before.pb>... -- <after.pb>...");
-    println!("  protorev experiments [--json] <manifest>");
 }
