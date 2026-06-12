@@ -1,0 +1,6 @@
+before samples: 1
+after samples: 1
+
+root:
+  added:
+    field 4: observed 1/1 samples; wires: fixed32; confidence: medium

@@ -1,0 +1,1 @@
+{"len":10,"fields":[{"number":1,"wire_type":"varint","tag_offset":0,"value_offset":1,"end_offset":3,"value":{"kind":"varint","value":150}},{"number":2,"wire_type":"length-delimited","tag_offset":3,"value_offset":4,"end_offset":10,"value":{"kind":"length-delimited","len":5,"hex":"7469746c65","hints":{"message":false,"utf8":true,"packed_varint":false},"text":"title"}}]}

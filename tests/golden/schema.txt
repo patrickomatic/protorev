@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+message Message {
+  uint64 field_1 = 1; // confidence: high; observed 2/2 samples; wires: varint; occurrences: 2
+  bytes field_2 = 2; // confidence: high; observed 2/2 samples; wires: length-delimited; occurrences: 2; nested: 0/2; utf8: 2/2; packed-varint: 0/2
+}
+
