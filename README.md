@@ -7,6 +7,24 @@ evidence you need while reverse engineering unknown protobuf streams: offsets,
 wire types, recursive length-delimited candidates, corpus-level field presence,
 and a draft schema that stays honest about what was observed.
 
+## Install
+
+Install the latest GitHub release with the cargo-dist installer:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/patrickomatic/protorev/releases/latest/download/protorev-installer.sh | sh
+```
+
+Or install from crates.io:
+
+```bash
+cargo install protorev
+```
+
+Prebuilt archives and a PowerShell installer for Windows are available on the
+[GitHub releases page](https://github.com/patrickomatic/protorev/releases).
+
 ## Commands
 
 ```bash
