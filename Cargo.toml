@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 readme = "README.md"
 description = "A protobuf reverse-engineering workbench"
+repository = "https://github.com/patrickomatic/protorev"
 
 [dependencies]
 
@@ -15,3 +16,8 @@ expect_used = "deny"
 panic = "deny"
 missing_errors_doc = "allow"
 must_use_candidate = "allow"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
