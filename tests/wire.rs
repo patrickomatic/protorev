@@ -7,6 +7,7 @@ use protorev::{
     Confidence, Corpus, Error, ExperimentManifest, LengthDelimitedHints, Message, SchemaOptions,
     Value, WireType, dump_message, dump_message_json,
 };
+use serde_json::Value as JsonValue;
 
 #[test]
 fn decodes_basic_wire_fields_with_offsets() -> Result<(), protorev::Error> {
@@ -133,6 +134,27 @@ fn dump_json_exposes_offsets_values_and_hints() -> Result<(), protorev::Error> {
     assert!(json.contains("\"message\":true"));
     assert!(json.contains("\"nested\":{\"len\":2"));
 
+    let parsed = parse_json(&json)?;
+    assert_eq!(parsed["len"], JsonValue::from(bytes.len()));
+    assert_eq!(parsed["fields"][0]["number"], JsonValue::from(1));
+    assert_eq!(
+        parsed["fields"][0]["value"]["kind"],
+        JsonValue::from("varint")
+    );
+    assert_eq!(parsed["fields"][0]["value"]["value"], JsonValue::from(150));
+    assert_eq!(
+        parsed["fields"][1]["value"]["text"],
+        JsonValue::from("title")
+    );
+    assert_eq!(
+        parsed["fields"][2]["value"]["hints"]["message"],
+        JsonValue::from(true)
+    );
+    assert_eq!(
+        parsed["fields"][2]["value"]["nested"]["len"],
+        JsonValue::from(2)
+    );
+
     Ok(())
 }
 
@@ -146,6 +168,11 @@ fn json_outputs_escape_text_and_manifest_strings() -> Result<(), Box<dyn std::er
 
     assert!(!dump_json.contains('\n'));
     assert!(dump_json.contains(r#""text":"line\n\"quoted\"\\path\tend""#));
+    let parsed_dump = parse_json_box(&dump_json)?;
+    assert_eq!(
+        parsed_dump["fields"][0]["value"]["text"],
+        JsonValue::from("line\n\"quoted\"\\path\tend")
+    );
 
     let messages = vec![message];
     let corpus = Corpus::from_messages(&messages, 1);
@@ -155,6 +182,11 @@ fn json_outputs_escape_text_and_manifest_strings() -> Result<(), Box<dyn std::er
         .values_json(&messages, &field)
         .ok_or_else(|| protorev::Error::message("field should have values"))?;
     assert!(values_json.contains(r#""value":"line\n\"quoted\"\\path\tend""#));
+    let parsed_values = parse_json_box(&values_json)?;
+    assert_eq!(
+        parsed_values["length_delimited"]["text_common"][0]["value"],
+        JsonValue::from("line\n\"quoted\"\\path\tend")
+    );
 
     let dir = temp_dir("json-escape")?;
     let before_path = dir.join("before.pb");
@@ -182,6 +214,15 @@ fn json_outputs_escape_text_and_manifest_strings() -> Result<(), Box<dyn std::er
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains(r#""name":"quote \" slash \\""#));
     assert!(stdout.contains(r#""notes":"line\nnext\tcell""#));
+    let parsed_experiments = parse_json_box(&stdout)?;
+    assert_eq!(
+        parsed_experiments["experiments"][0]["name"],
+        JsonValue::from("quote \" slash \\")
+    );
+    assert_eq!(
+        parsed_experiments["experiments"][0]["notes"],
+        JsonValue::from("line\nnext\tcell")
+    );
 
     Ok(())
 }
@@ -379,6 +420,13 @@ fn explain_reports_field_evidence_by_path() -> Result<(), protorev::Error> {
     assert!(json.contains("\"confidence\":\"high\""));
     assert!(json.contains("\"high\":true"));
 
+    let parsed = parse_json(&json)?;
+    assert_eq!(parsed["path"], JsonValue::from("3.1"));
+    assert_eq!(parsed["name"], JsonValue::from("field_1"));
+    assert_eq!(parsed["schema_type"], JsonValue::from("uint64"));
+    assert_eq!(parsed["confidence"], JsonValue::from("high"));
+    assert_eq!(parsed["included"]["high"], JsonValue::from(true));
+
     Ok(())
 }
 
@@ -417,6 +465,15 @@ fn values_summarizes_numeric_and_length_delimited_fields() -> Result<(), protore
     assert!(numeric_json.contains("\"path\":\"1\""));
     assert!(numeric_json.contains("\"max\":42"));
     assert!(numeric_json.contains("\"counter_or_id\":true"));
+    let parsed_numeric = parse_json(&numeric_json)?;
+    assert_eq!(parsed_numeric["path"], JsonValue::from("1"));
+    assert_eq!(parsed_numeric["occurrences"], JsonValue::from(3));
+    assert_eq!(parsed_numeric["varint"]["min"], JsonValue::from(0));
+    assert_eq!(parsed_numeric["varint"]["max"], JsonValue::from(42));
+    assert_eq!(
+        parsed_numeric["varint"]["candidates"]["counter_or_id"],
+        JsonValue::from(true)
+    );
 
     assert!(text.contains("length-delimited:"));
     assert!(text.contains("utf8: 2/2"));
@@ -502,6 +559,25 @@ fn corpus_diff_reports_added_removed_and_changed_fields() -> Result<(), protorev
     assert!(json.contains("\"path\":\"4\""));
     assert!(json.contains("\"path\":\"3\""));
     assert!(json.contains("repetition: singular -> repeated"));
+    let parsed_json = parse_json(&json)?;
+    assert_eq!(parsed_json["before_samples"], JsonValue::from(2));
+    assert_eq!(parsed_json["after_samples"], JsonValue::from(2));
+    assert_eq!(
+        parsed_json["messages"][0]["message"],
+        JsonValue::from("root")
+    );
+    assert_eq!(
+        parsed_json["messages"][0]["added"][0]["path"],
+        JsonValue::from("4")
+    );
+    assert_eq!(
+        parsed_json["messages"][0]["removed"][0]["path"],
+        JsonValue::from("3")
+    );
+    assert_eq!(
+        parsed_json["messages"][0]["changed"][0]["path"],
+        JsonValue::from("2")
+    );
 
     Ok(())
 }
@@ -904,6 +980,14 @@ fn assert_truncated(bytes: &[u8], text: &str) {
         .map(|error| error.to_string())
         .unwrap_or_default();
     assert!(error.contains(text), "{error}");
+}
+
+fn parse_json(value: &str) -> Result<JsonValue, protorev::Error> {
+    serde_json::from_str(value).map_err(|error| protorev::Error::message(error.to_string()))
+}
+
+fn parse_json_box(value: &str) -> Result<JsonValue, Box<dyn std::error::Error>> {
+    serde_json::from_str(value).map_err(Into::into)
 }
 
 fn assert_manifest_error(manifest: &str, text: &str) {

@@ -22,3 +22,6 @@ must_use_candidate = "allow"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[dev-dependencies]
+serde_json = "1.0.150"
