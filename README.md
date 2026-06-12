@@ -28,14 +28,14 @@ Prebuilt archives and a PowerShell installer for Windows are available on the
 ## Commands
 
 ```bash
-cargo run -p protorev -- dump sample.pb
-cargo run -p protorev -- dump --json sample.pb
-cargo run -p protorev -- infer samples/*.pb
-cargo run -p protorev -- schema samples/*.pb
-cargo run -p protorev -- explain --field 3.1 samples/*.pb
-cargo run -p protorev -- values --field 1 samples/*.pb
-cargo run -p protorev -- diff before/*.pb -- after/*.pb
-cargo run -p protorev -- experiments experiments.protorev
+protorev dump sample.pb
+protorev dump --json sample.pb
+protorev infer samples/*.pb
+protorev schema samples/*.pb
+protorev explain --field 3.1 samples/*.pb
+protorev values --field 1 samples/*.pb
+protorev diff before/*.pb -- after/*.pb
+protorev experiments experiments.protorev
 ```
 
 ### `dump`
@@ -60,7 +60,7 @@ look like more than one thing.
 Use `--json` when another tool needs offsets, raw values, and hints:
 
 ```bash
-cargo run -p protorev -- dump --json sample.pb
+protorev dump --json sample.pb
 ```
 
 ### `infer`
@@ -89,7 +89,7 @@ message Message {
 `explain` reports the evidence behind one field path:
 
 ```bash
-cargo run -p protorev -- explain --field 3.1 samples/*.pb
+protorev explain --field 3.1 samples/*.pb
 ```
 
 The output names the synthetic field, schema type, confidence, observation
@@ -100,7 +100,7 @@ message candidates.
 For tooling, add `--json`:
 
 ```bash
-cargo run -p protorev -- explain --json --field 3.1 samples/*.pb
+protorev explain --json --field 3.1 samples/*.pb
 ```
 
 ### `values`
@@ -108,7 +108,7 @@ cargo run -p protorev -- explain --json --field 3.1 samples/*.pb
 `values` summarizes observed values for one field path:
 
 ```bash
-cargo run -p protorev -- values --field 1 samples/*.pb
+protorev values --field 1 samples/*.pb
 ```
 
 For numeric fields it reports min, max, distinct count, common values, and
@@ -119,7 +119,7 @@ and packed-varint observation counts.
 For tooling:
 
 ```bash
-cargo run -p protorev -- values --json --field 1 samples/*.pb
+protorev values --json --field 1 samples/*.pb
 ```
 
 ### `diff`
@@ -127,7 +127,7 @@ cargo run -p protorev -- values --json --field 1 samples/*.pb
 `diff` compares two corpora and reports structural changes:
 
 ```bash
-cargo run -p protorev -- diff before/*.pb -- after/*.pb
+protorev diff before/*.pb -- after/*.pb
 ```
 
 It reports added, removed, and changed fields. A changed field can include
@@ -137,13 +137,13 @@ changes.
 The old two-file shorthand still works:
 
 ```bash
-cargo run -p protorev -- diff before.pb after.pb
+protorev diff before.pb after.pb
 ```
 
 For tooling:
 
 ```bash
-cargo run -p protorev -- diff --json before/*.pb -- after/*.pb
+protorev diff --json before/*.pb -- after/*.pb
 ```
 
 ### `experiments`
@@ -151,7 +151,7 @@ cargo run -p protorev -- diff --json before/*.pb -- after/*.pb
 `experiments` runs named before/after corpus comparisons from a small manifest:
 
 ```bash
-cargo run -p protorev -- experiments experiments.protorev
+protorev experiments experiments.protorev
 ```
 
 Manifest paths are resolved relative to the manifest file:
@@ -173,7 +173,7 @@ Each experiment prints its name, notes, sample paths, and the same structural
 diff produced by `diff`. Use JSON for stable artifacts:
 
 ```bash
-cargo run -p protorev -- experiments --json experiments.protorev
+protorev experiments --json experiments.protorev
 ```
 
 ### `schema`
@@ -182,7 +182,7 @@ cargo run -p protorev -- experiments --json experiments.protorev
 only high-confidence fields:
 
 ```bash
-cargo run -p protorev -- schema samples/*.pb
+protorev schema samples/*.pb
 ```
 
 High confidence currently means:
@@ -196,7 +196,7 @@ High confidence currently means:
 For exploratory output, lower the threshold:
 
 ```bash
-cargo run -p protorev -- schema --min-confidence medium samples/*.pb
+protorev schema --min-confidence medium samples/*.pb
 ```
 
 The emitted schema is intentionally structural:
