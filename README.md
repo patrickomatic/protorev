@@ -2,10 +2,6 @@
 
 `protorev` is a small protobuf reverse-engineering workbench.
 
-It is intentionally separate from the parent `iwork` crate: it has its own
-library, binary, tests, and build target. The parent repository only exposes it
-as a Cargo workspace member.
-
 The goal is not to replace `protoc --decode_raw`. The goal is to keep the
 evidence you need while reverse engineering unknown protobuf streams: offsets,
 wire types, recursive length-delimited candidates, corpus-level field presence,
@@ -246,5 +242,5 @@ payload into this crate.
 Promote a hypothesis only after it survives comparison across controlled
 samples. That is the line between structural knowledge and content coincidence.
 
-Adapters for framed formats, such as iWork IWA/Snappy archives, should live
-behind this crate boundary rather than inside the existing `iwork` parser.
+Adapters for framed or containerized formats should decode their own outer
+framing and pass raw protobuf payloads into this crate.

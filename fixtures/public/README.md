@@ -1,7 +1,7 @@
 # Public protobuf wire fixtures
 
 These fixtures are raw protobuf wire streams represented as lowercase hex.
-They are intentionally independent of the `iwork` examples.
+They are intentionally small, public, and schema-documented.
 
 Source: the official Protocol Buffers encoding guide:
 
