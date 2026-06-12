@@ -54,10 +54,31 @@ fn decodes_fixed_width_fields() -> Result<(), protorev::Error> {
 fn rejects_invalid_and_truncated_wire_streams() {
     assert_invalid_wire(&[0x00], "field tag cannot be zero");
     assert_invalid_wire(&[0x0b], "unsupported wire type");
+    assert_invalid_wire(
+        &[
+            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+        ],
+        "varint overflow",
+    );
     assert_truncated(&[0x80], "truncated varint at offset 1");
     assert_truncated(&[0x0a, 0x03, b'a'], "truncated length-delimited field");
     assert_truncated(&[0x09, 1, 2], "truncated fixed64");
     assert_truncated(&[0x15, 1, 2], "truncated fixed32");
+}
+
+#[test]
+fn decodes_varint_boundaries_and_rejects_field_number_overflow() -> Result<(), protorev::Error> {
+    let mut max_value = Vec::new();
+    push_varint_field(&mut max_value, 1, u64::MAX);
+    let message = Message::decode(&max_value)?;
+    assert_eq!(message.fields[0].value, Value::Varint(u64::MAX));
+
+    let mut overflowing_tag = Vec::new();
+    push_varint(&mut overflowing_tag, (u64::from(u32::MAX) + 1) << 3);
+    push_varint(&mut overflowing_tag, 1);
+    assert_invalid_wire(&overflowing_tag, "field number overflow");
+
+    Ok(())
 }
 
 #[test]
@@ -79,6 +100,22 @@ fn dump_marks_nested_utf8_and_packed_candidates() -> Result<(), protorev::Error>
 }
 
 #[test]
+fn dump_respects_recursive_depth_limit() -> Result<(), protorev::Error> {
+    let deepest = message_bytes(&[(1, 0, 7)]);
+    let mut middle = Vec::new();
+    push_len_field(&mut middle, 1, &deepest);
+    let mut outer = Vec::new();
+    push_len_field(&mut outer, 1, &middle);
+
+    let dump = dump_message(&Message::decode(&outer)?, 1);
+
+    assert_eq!(dump.matches("field 1 length-delimited").count(), 2);
+    assert!(!dump.contains("field 1 varint = 7"));
+
+    Ok(())
+}
+
+#[test]
 fn dump_json_exposes_offsets_values_and_hints() -> Result<(), protorev::Error> {
     let nested = message_bytes(&[(1, 0, 7)]);
     let mut bytes = Vec::new();
@@ -95,6 +132,56 @@ fn dump_json_exposes_offsets_values_and_hints() -> Result<(), protorev::Error> {
     assert!(json.contains("\"text\":\"title\""));
     assert!(json.contains("\"message\":true"));
     assert!(json.contains("\"nested\":{\"len\":2"));
+
+    Ok(())
+}
+
+#[test]
+fn json_outputs_escape_text_and_manifest_strings() -> Result<(), Box<dyn std::error::Error>> {
+    let text = b"line\n\"quoted\"\\path\tend";
+    let mut bytes = Vec::new();
+    push_len_field(&mut bytes, 1, text);
+    let message = Message::decode(&bytes)?;
+    let dump_json = dump_message_json(&message, 1);
+
+    assert!(!dump_json.contains('\n'));
+    assert!(dump_json.contains(r#""text":"line\n\"quoted\"\\path\tend""#));
+
+    let messages = vec![message];
+    let corpus = Corpus::from_messages(&messages, 1);
+    let field = protorev::FieldPath::parse("1")
+        .ok_or_else(|| protorev::Error::message("field path should parse"))?;
+    let values_json = corpus
+        .values_json(&messages, &field)
+        .ok_or_else(|| protorev::Error::message("field should have values"))?;
+    assert!(values_json.contains(r#""value":"line\n\"quoted\"\\path\tend""#));
+
+    let dir = temp_dir("json-escape")?;
+    let before_path = dir.join("before.pb");
+    let after_path = dir.join("after.pb");
+    let manifest_path = dir.join("experiments.protorev");
+    let mut before = Vec::new();
+    push_varint_field(&mut before, 1, 1);
+    let mut after = Vec::new();
+    push_varint_field(&mut after, 1, 2);
+    std::fs::write(&before_path, before)?;
+    std::fs::write(&after_path, after)?;
+    std::fs::write(
+        &manifest_path,
+        r#"
+        [[experiment]]
+        name = "quote \" slash \\"
+        notes = "line\nnext\tcell"
+        before = ["before.pb"]
+        after = ["after.pb"]
+        "#,
+    )?;
+
+    let output = run_protorev(["experiments", "--json", path_str(&manifest_path)?])?;
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains(r#""name":"quote \" slash \\""#));
+    assert!(stdout.contains(r#""notes":"line\nnext\tcell""#));
 
     Ok(())
 }
@@ -454,6 +541,103 @@ fn experiment_manifest_parses_named_corpora() -> Result<(), protorev::Error> {
 }
 
 #[test]
+fn experiment_manifest_handles_escapes_and_comments_inside_strings() -> Result<(), protorev::Error>
+{
+    let manifest = ExperimentManifest::parse(
+        r#"
+        [[experiment]]
+        name = "hash # quote \" slash \\"
+        notes = "line\nnext\tcell"
+        before = ["before#one.pb"] # real comment
+        after = ["after.pb"]
+        "#,
+        "/tmp/protorev-manifest",
+    )?;
+
+    let experiment = &manifest.experiments[0];
+    assert_eq!(experiment.name, "hash # quote \" slash \\");
+    assert_eq!(experiment.notes.as_deref(), Some("line\nnext\tcell"));
+    assert_eq!(
+        experiment.before[0],
+        PathBuf::from("/tmp/protorev-manifest/before#one.pb")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn experiment_manifest_reports_invalid_input() {
+    assert_manifest_error(
+        "name = \"missing section\"",
+        "expected [[experiment]] before key-value entries",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        before = ["before.pb"]
+        after = ["after.pb"]
+        "#,
+        "experiment is missing name",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        name = "missing after"
+        before = ["before.pb"]
+        "#,
+        "experiment is missing after",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        name = "duplicate"
+        name = "again"
+        before = ["before.pb"]
+        after = ["after.pb"]
+        "#,
+        "duplicate key \"name\"",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        name = "unknown"
+        description = "nope"
+        before = ["before.pb"]
+        after = ["after.pb"]
+        "#,
+        "unknown key \"description\"",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        name = "empty before"
+        before = []
+        after = ["after.pb"]
+        "#,
+        "before must contain at least one path",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        name = "bad escape"
+        notes = "\x"
+        before = ["before.pb"]
+        after = ["after.pb"]
+        "#,
+        "unsupported string escape",
+    );
+    assert_manifest_error(
+        r#"
+        [[experiment]]
+        name = "trailing comma"
+        before = ["before.pb",]
+        after = ["after.pb"]
+        "#,
+        "trailing comma is not supported",
+    );
+}
+
+#[test]
 fn cli_dump_infer_and_diff_use_library_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Vec::new();
     push_varint_field(&mut first, 1, 150);
@@ -623,6 +807,57 @@ fn cli_reports_usage_errors() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[test]
+fn cli_reports_argument_file_and_field_errors() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    push_varint_field(&mut bytes, 1, 10);
+    let sample_path = write_sample("errors", &bytes)?;
+
+    let bad_field = run_protorev(["explain", "--field", "0", path_str(&sample_path)?])?;
+    assert_failure_contains(&bad_field, "must look like 1 or 3.1")?;
+
+    let bad_confidence = run_protorev([
+        "schema",
+        "--min-confidence",
+        "certain",
+        path_str(&sample_path)?,
+    ])?;
+    assert_failure_contains(&bad_confidence, "must be one of: high, medium, low")?;
+
+    let missing_file_path = std::env::temp_dir().join(format!(
+        "protorev-missing-{}-{}.pb",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let missing_file = run_protorev(["dump", path_str(&missing_file_path)?])?;
+    assert_failure_contains(&missing_file, "No such file")?;
+
+    let diff_without_separator = run_protorev([
+        "diff",
+        path_str(&sample_path)?,
+        path_str(&sample_path)?,
+        path_str(&sample_path)?,
+    ])?;
+    assert_failure_contains(
+        &diff_without_separator,
+        "usage: protorev diff [--json] <before.pb>... -- <after.pb>...",
+    )?;
+
+    let unobserved_explain = run_protorev(["explain", "--field", "2", path_str(&sample_path)?])?;
+    assert_failure_contains(
+        &unobserved_explain,
+        "field 2 was not observed in the corpus",
+    )?;
+
+    let unobserved_values = run_protorev(["values", "--field", "2", path_str(&sample_path)?])?;
+    assert_failure_contains(
+        &unobserved_values,
+        "field 2 had no observed values in the corpus",
+    )?;
+
+    Ok(())
+}
+
 fn message_bytes(fields: &[(u32, u8, u64)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (number, wire_type, value) in fields {
@@ -665,6 +900,14 @@ fn assert_invalid_wire(bytes: &[u8], reason: &str) {
 
 fn assert_truncated(bytes: &[u8], text: &str) {
     let error = Message::decode(bytes)
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(error.contains(text), "{error}");
+}
+
+fn assert_manifest_error(manifest: &str, text: &str) {
+    let error = ExperimentManifest::parse(manifest, "/tmp/protorev-manifest")
         .err()
         .map(|error| error.to_string())
         .unwrap_or_default();
@@ -717,4 +960,14 @@ fn assert_success(output: &std::process::Output) {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn assert_failure_contains(
+    output: &std::process::Output,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr.clone())?;
+    assert!(stderr.contains(text), "{stderr}");
+    Ok(())
 }

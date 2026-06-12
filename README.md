@@ -38,6 +38,17 @@ protorev diff before/*.pb -- after/*.pb
 protorev experiments experiments.protorev
 ```
 
+## Input Format
+
+CLI commands read raw protobuf wire payloads from files. They do not read hex
+text, JSON, `.proto` schemas, gRPC length-prefixed frames, protobuf-delimited
+record streams, or application/container formats directly.
+
+If your capture has framing or an outer container, strip that layer first and
+write each raw protobuf message payload to its own file. For inspectable sample
+fixtures, keep the hex source in git and materialize bytes before passing them
+to `protorev`.
+
 ### `dump`
 
 `dump` decodes one raw protobuf message and prints each field with byte offsets:
@@ -176,6 +187,17 @@ diff produced by `diff`. Use JSON for stable artifacts:
 protorev experiments --json experiments.protorev
 ```
 
+Manifest syntax is intentionally small:
+
+- experiments start with `[[experiment]]`
+- supported keys are `name`, `notes`, `before`, and `after`
+- `name` is required; `notes` is optional
+- `before` and `after` are required string arrays with at least one path
+- relative sample paths are resolved relative to the manifest file
+- comments start with `#` outside quoted strings
+- quoted strings support `\"`, `\\`, `\n`, `\r`, and `\t`
+- trailing commas are not supported
+
 ### `schema`
 
 `schema` emits a confidence-gated structural `.proto`. By default it includes
@@ -212,6 +234,26 @@ message Message {
 `schema` still does not invent semantic names or scalar intent. A stable varint
 is `uint64`; a stable length-delimited field is either a consistently observed
 nested message or `bytes`.
+
+## Suggested Workflow
+
+Start with small, controlled corpora. Capture a baseline message set, change one
+producer behavior, capture the after set, then compare structure:
+
+```bash
+protorev diff before/*.pb -- after/*.pb
+protorev explain --field 3.1 before/*.pb after/*.pb
+protorev values --field 3.1 before/*.pb after/*.pb
+```
+
+Use `schema` after the same field shape survives several controlled samples.
+Keep the default high-confidence threshold for durable output; lower it only
+when exploring hypotheses:
+
+```bash
+protorev schema before/*.pb after/*.pb
+protorev schema --min-confidence medium before/*.pb after/*.pb
+```
 
 ## Scope
 
